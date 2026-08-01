@@ -1,0 +1,16 @@
+{
+  "name": "rapidx-voice",
+  "version": "1.0.0",
+  "description": "RapidX Voice. A premium, multi-tenant, provider-agnostic AI voice agent platform. Production voice agents at roughly one rupee, powered by Rumik silk TTS, with a swappable TTS, LLM, and telephony engine. One portable folder, zero npm dependencies, runs with node server.js.",
+  "private": true,
+  "type": "commonjs",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "setup": "sh setup.sh"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "UNLICENSED"
+}
