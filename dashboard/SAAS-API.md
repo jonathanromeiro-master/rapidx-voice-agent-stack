@@ -34,10 +34,29 @@ All endpoints use the existing `rxv_sess` HttpOnly cookie. Every customer resour
 - `POST /api/support/tickets` with `{subject,message,priority}` returns `{ticket}`.
 - `POST /api/support/tickets/reply` with `{ticketId,message}` returns `{message}`.
 - `POST /api/voice/session` creates a short-lived Dograh SmallWebRTC session for the authenticated tenant. The long-lived embed token remains server-side.
+- `GET /api/demo-links` lists tenant-owned link metadata without secret tokens. Owner required.
+- `POST /api/demo-links` with `{agentId,label,expiresInDays,maxSessionSeconds,maxStarts}` creates a link and returns its `sharePath` once. Owner required.
+- `POST /api/demo-links/revoke` with `{id}` immediately revokes a tenant-owned link. Owner required.
+- `GET /api/public/demo/<token>` returns public tenant branding, agent display metadata and link limits only.
+- `POST /api/public/demo/<token>/session` reserves one allowed start and creates a short-lived Dograh SmallWebRTC session with same-origin proxied TURN credentials. It returns no tenant admin data or stable provider secrets.
 - `GET /api/hvac/desk` returns the tenant's HVAC jobs, summary counters, timezone, and calendar status.
 - `GET /api/hvac/event-types` and `GET /api/hvac/slots` proxy authenticated Cal.com availability without exposing the API key.
 - `POST /api/hvac/jobs` creates or updates a tenant-scoped call outcome.
 - `POST /api/hvac/book` creates a Cal.com booking and records the booked outcome for the tenant.
+
+## Provider and model contract
+
+- `GET /api/providers` reports implemented STT, TTS, LLM, and telephony adapters. Each row contains the provider ID, label, selected state, configured state in `live`, model ID where applicable, and the names of required environment variables. Secret values are never returned.
+- STT is intentionally fixed to Deepgram. A selection containing any other STT provider fails with `stt_provider_fixed` before network I/O.
+- The server default LLM is selected by `LLM_PROVIDER` and `LLM_MODEL`. Implemented LLM IDs are `groq` and `gemini`.
+- The server default TTS is selected by `TTS_PROVIDER` and `TTS_MODEL`. The implemented TTS ID is `rumik`, with `muga` and `mulberry` models.
+- A trusted tenant or agent provider selection may contain only `{provider,model}`. Keys, tokens, base URLs, and arbitrary fields are rejected. Credentials are resolved only from server-side environment or a future encrypted secret store.
+- Provider IDs and model IDs are validated. `GROQ_ALLOWED_MODELS` and `GEMINI_ALLOWED_MODELS` can restrict selectable models with comma-separated allowlists.
+- Adding a provider requires a complete adapter contract and mocked tests. LLM adapters implement `chat`. TTS adapters implement `synthesize` and `wsConnect`. Unimplemented vendors are not advertised.
+
+The existing `/api/chat`, `/api/tts`, and voice workflow routes use the process-level defaults. Per-tenant persistence and routing of provider IDs is a separate migration and must not store credentials in tenant JSON.
+
+Dograh's published workflow remains the runtime authority for phone and browser WebRTC calls. Changing a dashboard environment default does not mutate that published workflow. Per-agent runtime switching requires a tenant-scoped Dograh workflow binding that maps the selected LLM and TTS adapters into the call graph. Until those bindings exist, provider selection applies only to dashboard-owned provider routes.
 
 ## Platform admin APIs
 
@@ -54,7 +73,7 @@ All endpoints use the existing `rxv_sess` HttpOnly cookie. Every customer resour
 
 ## Persistence collections
 
-Schema version 2 adds `wallets`, `ledger`, `paymentIntents`, `supportTickets`, `supportMessages`, `auditEvents`, `presets`, `byonConnections`, `hvacJobs`, `hvacSettings`, and `paymentEvents`. Startup migration is additive. Existing agents, usage, tenants, users, and sessions remain valid. New session tokens are stored as SHA-256 hashes; legacy sessions continue to resolve during migration.
+Schema version 3 includes `wallets`, `ledger`, `paymentIntents`, `supportTickets`, `supportMessages`, `auditEvents`, `presets`, `byonConnections`, `hvacJobs`, `hvacSettings`, `paymentEvents`, and `demoLinks`. Startup migration is additive. Existing agents, usage, tenants, users, and sessions remain valid. New session and demo-link tokens are stored as SHA-256 hashes; legacy sessions continue to resolve during migration.
 
 The JSON store remains suitable for a single-process demo. Production must move these contracts to transactional PostgreSQL before accepting money. PayU success redirects must never credit a wallet. Only a verified, idempotent server callback may convert a payment intent into a ledger credit.
 

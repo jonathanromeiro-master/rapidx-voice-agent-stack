@@ -1,16 +1,17 @@
 /**
  * RapidX Voice. Provider-agnostic engine.
  *
- * Four registries, each a uniform set of adapters:
- *   stt        : deepgram (LIVE)
- *   tts        : rumik (LIVE) + elevenlabs, sarvam (stubs)
- *   llm        : groq (LIVE) + gemini, claude
- *   telephony  : vobiz via Dograh (LIVE) + zoom, twilio (stubs)
+ * Four registries, each a uniform set of implemented adapters:
+ *   stt        : deepgram, intentionally fixed
+ *   tts        : rumik
+ *   llm        : groq + gemini
+ *   telephony  : vobiz via Dograh
  *
- * Every adapter declares { id, label, live, needs:[envKeys], ... }. The `live`
- * flag is DERIVED from whether all required env keys are present at call time,
- * so the same code path lights up the moment a tenant adds the keys. Stubs
- * return a clear "not configured, add <ENV>" error instead of pretending.
+ * Every adapter declares { id, label, needs:[envKeys], ... }. `live` means the
+ * adapter is implemented and configured, never merely that a key exists.
+ * LLM_PROVIDER, LLM_MODEL, TTS_PROVIDER and TTS_MODEL select server defaults.
+ * A tenant-safe selection contains provider and model IDs only. Secrets remain
+ * in process.env and can never be supplied through a tenant request.
  *
  * Deepgram handles streaming and batch transcription, Rumik keeps the verified
  * browser UA, Groq handles the primary reasoning path, and
@@ -33,6 +34,9 @@ const MAX_TEXT = 2000; // Rumik hard cap
 
 const TTS_MODELS = new Set(['muga', 'mulberry']);
 const TTS_SPEAKERS = new Set(['speaker_1', 'speaker_2', 'speaker_3', 'speaker_4']);
+const PROVIDER_ID_RE = /^[a-z][a-z0-9_-]{0,63}$/;
+const MODEL_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/;
+const PROVIDER_LAYERS = new Set(['stt', 'tts', 'llm', 'telephony']);
 
 // A capability error that route handlers can map to an HTTP status cleanly.
 class ProviderError extends Error {
@@ -59,6 +63,32 @@ function notConfigured(label, needs) {
   );
 }
 
+function validModelId(value, label = 'model') {
+  const model = String(value || '').trim();
+  if (!MODEL_ID_RE.test(model)) {
+    throw new ProviderError(`${label} is invalid`, 422, 'invalid_model');
+  }
+  return model;
+}
+
+function commaListEnv(name) {
+  return String(process.env[name] || '').split(',').map((value) => value.trim()).filter(Boolean);
+}
+
+function selectedModel(adapter, requestedModel) {
+  const globalModel = adapter.id === configuredDefaultId(adapter.layer)
+    ? process.env[`${adapter.layer.toUpperCase()}_MODEL`] : '';
+  const model = validModelId(requestedModel || globalModel || adapter.model, `${adapter.label} model`);
+  if (adapter.models && !adapter.models.has(model)) {
+    throw new ProviderError(`${model} is not supported by ${adapter.label}`, 422, 'unsupported_model');
+  }
+  const allowed = adapter.modelAllowlistEnv ? commaListEnv(adapter.modelAllowlistEnv) : [];
+  if (allowed.length && !allowed.includes(model)) {
+    throw new ProviderError(`${model} is not enabled for ${adapter.label}`, 422, 'model_not_enabled');
+  }
+  return model;
+}
+
 /* ==========================================================================
    TTS LAYER
    ========================================================================== */
@@ -68,7 +98,10 @@ const ttsRumik = {
   label: 'Rumik Silk',
   layer: 'tts',
   needs: ['RUMIK_API_KEY'],
+  implemented: true,
+  models: TTS_MODELS,
   get live() { return hasEnv(this.needs); },
+  get model() { return process.env.RUMIK_MODEL || 'mulberry'; },
 
   // Synthesize one utterance. Returns { buffer (WAV bytes), credits, chars }.
   // Reuses the verified /v1/tts call exactly: Bearer key + browser UA, mulberry
@@ -77,7 +110,7 @@ const ttsRumik = {
     const key = process.env.RUMIK_API_KEY;
     if (!key) throw notConfigured(this.label, this.needs);
 
-    const model = TTS_MODELS.has(opts.model) ? opts.model : 'muga';
+    const model = selectedModel(this, opts.model);
     const text = String(opts.text || '').slice(0, MAX_TEXT);
     if (!text.trim()) throw new ProviderError('text is required', 422, 'no_text');
 
@@ -116,7 +149,7 @@ const ttsRumik = {
   async wsConnect(opts) {
     const key = process.env.RUMIK_API_KEY;
     if (!key) throw notConfigured(this.label, this.needs);
-    const model = TTS_MODELS.has(opts.model) ? opts.model : 'mulberry';
+    const model = selectedModel(this, opts.model);
     const buf = Buffer.from(JSON.stringify({
       model,
       text: String(opts.text || '').slice(0, MAX_TEXT),
@@ -137,28 +170,8 @@ const ttsRumik = {
   },
 };
 
-const ttsElevenlabs = {
-  id: 'elevenlabs',
-  label: 'ElevenLabs',
-  layer: 'tts',
-  needs: ['ELEVENLABS_API_KEY'],
-  get live() { return hasEnv(this.needs); },
-  async synthesize() { throw notConfigured(this.label, this.needs); },
-  async wsConnect() { throw notConfigured(this.label, this.needs); },
-};
-
-const ttsSarvam = {
-  id: 'sarvam',
-  label: 'Sarvam AI',
-  layer: 'tts',
-  needs: ['SARVAM_API_KEY'],
-  get live() { return hasEnv(this.needs); },
-  async synthesize() { throw notConfigured(this.label, this.needs); },
-  async wsConnect() { throw notConfigured(this.label, this.needs); },
-};
-
 /* ==========================================================================
-   LLM LAYER (brain + STT). Gemini LIVE, Claude stub. NEVER OpenAI.
+   LLM LAYER. Speech recognition intentionally remains Deepgram only.
    ========================================================================== */
 
 const DEFAULT_SYSTEM = 'You are RapidX, a warm, concise voice assistant. Reply in 1 to 3 short spoken sentences. No markdown, no lists, no emojis. This will be read aloud.';
@@ -168,6 +181,7 @@ const sttDeepgram = {
   label: 'Deepgram Nova-3',
   layer: 'stt',
   needs: ['DEEPGRAM_API_KEY'],
+  implemented: true,
   get live() { return hasEnv(this.needs); },
   get model() { return process.env.DEEPGRAM_MODEL || 'nova-3'; },
 
@@ -221,6 +235,8 @@ const llmGroq = {
   label: 'Groq Llama 3.3 70B',
   layer: 'llm',
   needs: ['GROQ_API_KEY'],
+  implemented: true,
+  modelAllowlistEnv: 'GROQ_ALLOWED_MODELS',
   get live() { return hasEnv(this.needs); },
   get model() { return process.env.GROQ_MODEL || 'llama-3.3-70b-versatile'; },
 
@@ -234,8 +250,9 @@ const llmGroq = {
         content: String(m.text).slice(0, 4000),
       })));
     if (messages.length < 2) throw new ProviderError('no messages', 422, 'no_messages');
+    const model = selectedModel(this, opts.model);
     const payload = Buffer.from(JSON.stringify({
-      model: this.model,
+      model,
       messages,
       temperature: 0.7,
       max_completion_tokens: 400,
@@ -257,7 +274,7 @@ const llmGroq = {
       text: String(((choice.message || {}).content) || '').trim() || 'Sorry, I did not catch that.',
       finish: choice.finish_reason || null,
       provider: 'groq',
-      model: this.model,
+      model,
       latency_ms: Date.now() - started,
     };
   },
@@ -268,6 +285,8 @@ const llmGemini = {
   label: 'Google Gemini',
   layer: 'llm',
   needs: ['GEMINI_API_KEY'],
+  implemented: true,
+  modelAllowlistEnv: 'GEMINI_ALLOWED_MODELS',
   get live() { return hasEnv(this.needs); },
   get model() { return process.env.GEMINI_MODEL || 'gemini-flash-latest'; },
 
@@ -278,6 +297,7 @@ const llmGemini = {
     const key = process.env.GEMINI_API_KEY;
     if (!key) throw notConfigured(this.label, this.needs);
 
+    const model = selectedModel(this, opts.model);
     const history = Array.isArray(opts.messages) ? opts.messages.slice(-16) : [];
     const system = String(opts.system || DEFAULT_SYSTEM).slice(0, 2000);
     const contents = history
@@ -297,9 +317,10 @@ const llmGemini = {
         thinkingConfig: { thinkingBudget: 0 },
       },
     };
+    const started = Date.now();
     let buf = Buffer.from(JSON.stringify(payload));
     let up = await httpsPost(GEMINI_HOST,
-      `/v1beta/models/${encodeURIComponent(this.model)}:generateContent?key=${key}`,
+      `/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${key}`,
       { 'Content-Type': 'application/json', 'Content-Length': buf.length }, buf);
 
     let data; try { data = JSON.parse(up.buffer.toString('utf8')); } catch { data = {}; }
@@ -309,7 +330,7 @@ const llmGemini = {
       delete payload.generationConfig.thinkingConfig;
       buf = Buffer.from(JSON.stringify(payload));
       up = await httpsPost(GEMINI_HOST,
-        `/v1beta/models/${encodeURIComponent(this.model)}:generateContent?key=${key}`,
+        `/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${key}`,
         { 'Content-Type': 'application/json', 'Content-Length': buf.length }, buf);
       try { data = JSON.parse(up.buffer.toString('utf8')); } catch { data = {}; }
     }
@@ -320,63 +341,18 @@ const llmGemini = {
     const cand = (data.candidates || [])[0] || {};
     const parts = (cand.content && cand.content.parts) || [];
     const text = parts.map((p) => p.text || '').join('').trim();
-    return { text: text || 'Sorry, I did not catch that.', finish: cand.finishReason || null };
-  },
-
-  // Speech to text via Gemini inline_data. Works in any browser. Returns { text }.
-  async transcribe(opts) {
-    const key = process.env.GEMINI_API_KEY;
-    if (!key) throw notConfigured(this.label, this.needs);
-    const audio = String(opts.audio || '');
-    const mime = String(opts.mime || 'audio/wav');
-    if (audio.length < 200) throw new ProviderError('no audio', 422, 'no_audio');
-
-    const payload = {
-      contents: [{
-        role: 'user',
-        parts: [
-          { inline_data: { mime_type: mime, data: audio } },
-          { text: 'Transcribe the spoken words exactly. Return only the transcript text, nothing else. If there is no clear speech, return an empty string.' },
-        ],
-      }],
-      generationConfig: { temperature: 0, maxOutputTokens: 300, thinkingConfig: { thinkingBudget: 0 } },
+    return {
+      text: text || 'Sorry, I did not catch that.',
+      finish: cand.finishReason || null,
+      provider: this.id,
+      model,
+      latency_ms: Date.now() - started,
     };
-    let buf = Buffer.from(JSON.stringify(payload));
-    let up = await httpsPost(GEMINI_HOST,
-      `/v1beta/models/${encodeURIComponent(this.model)}:generateContent?key=${key}`,
-      { 'Content-Type': 'application/json', 'Content-Length': buf.length }, buf);
-
-    let d = {}; try { d = JSON.parse(up.buffer.toString('utf8')); } catch {}
-    if (up.status === 400 && /invalid argument/i.test((d.error && d.error.message) || '')) {
-      delete payload.generationConfig.thinkingConfig;
-      buf = Buffer.from(JSON.stringify(payload));
-      up = await httpsPost(GEMINI_HOST,
-        `/v1beta/models/${encodeURIComponent(this.model)}:generateContent?key=${key}`,
-        { 'Content-Type': 'application/json', 'Content-Length': buf.length }, buf);
-      try { d = JSON.parse(up.buffer.toString('utf8')); } catch { d = {}; }
-    }
-    if (up.status !== 200) {
-      throw new ProviderError('stt failed', up.status, 'upstream',
-        (d.error && d.error.message) || '');
-    }
-    const cand = (d.candidates || [])[0] || {};
-    const text = ((cand.content && cand.content.parts) || []).map((p) => p.text || '').join('').trim();
-    return { text };
   },
-};
-
-const llmClaude = {
-  id: 'claude',
-  label: 'Anthropic Claude',
-  layer: 'llm',
-  needs: ['ANTHROPIC_API_KEY'],
-  get live() { return hasEnv(this.needs); },
-  async chat() { throw notConfigured(this.label, this.needs); },
-  async transcribe() { throw notConfigured(this.label, this.needs); },
 };
 
 /* ==========================================================================
-   TELEPHONY LAYER. VoBiz through Dograh LIVE, Zoom + Twilio stubs.
+   TELEPHONY LAYER. VoBiz through Dograh.
    ========================================================================== */
 
 function dograhConnection() {
@@ -431,6 +407,7 @@ const telVobiz = {
     'DOGRAH_BASE_URL', 'DOGRAH_API_KEY', 'DOGRAH_WORKFLOW_ID',
     'DOGRAH_TELEPHONY_CONFIG_ID', 'DOGRAH_PHONE_NUMBER_ID',
   ],
+  implemented: true,
   get live() { return hasEnv(this.needs); },
   get did() { return String(process.env.VOBIZ_NUMBER || '').replace(/[^0-9+]/g, ''); },
   get dashboard() { return dograhConnection().dashboard; },
@@ -530,51 +507,89 @@ const telVobiz = {
   },
 };
 
-const telZoom = {
-  id: 'zoom',
-  label: 'Zoom Phone',
-  layer: 'telephony',
-  needs: ['ZOOM_ACCOUNT_ID', 'ZOOM_CLIENT_ID', 'ZOOM_CLIENT_SECRET'],
-  get live() { return hasEnv(this.needs); },
-  async status() { throw notConfigured(this.label, this.needs); },
-  async dial() { throw notConfigured(this.label, this.needs); },
-};
-
-const telTwilio = {
-  id: 'twilio',
-  label: 'Twilio Voice',
-  layer: 'telephony',
-  needs: ['TWILIO_ACCOUNT_SID', 'TWILIO_AUTH_TOKEN'],
-  get live() { return hasEnv(this.needs); },
-  async status() { throw notConfigured(this.label, this.needs); },
-  async dial() { throw notConfigured(this.label, this.needs); },
-};
-
 /* ==========================================================================
    Registries + lookups + describeProviders for GET /api/providers
    ========================================================================== */
 
-const registries = {
-  stt: { deepgram: sttDeepgram },
-  tts: { rumik: ttsRumik, elevenlabs: ttsElevenlabs, sarvam: ttsSarvam },
-  llm: { groq: llmGroq, gemini: llmGemini, claude: llmClaude },
-  telephony: { vobiz: telVobiz, zoom: telZoom, twilio: telTwilio },
+const registries = { stt: {}, tts: {}, llm: {}, telephony: {} };
+const requiredMethods = {
+  stt: ['transcribe', 'mintToken'],
+  tts: ['synthesize', 'wsConnect'],
+  llm: ['chat'],
+  telephony: ['status', 'dial'],
 };
 
-// Resolve an adapter for a layer, falling back to that layer's live default.
-function get(layer, id) {
-  const reg = registries[layer] || {};
-  if (id && reg[id]) return reg[id];
-  // default: the first live adapter, else the first declared.
-  const all = Object.values(reg);
-  return all.find((a) => a.live) || all[0] || null;
+function registerProvider(layer, adapter, options = {}) {
+  if (!PROVIDER_LAYERS.has(layer)) {
+    throw new ProviderError(`Unknown provider layer: ${layer}`, 500, 'invalid_provider_layer');
+  }
+  if (!adapter || adapter.implemented !== true || adapter.layer !== layer || !PROVIDER_ID_RE.test(String(adapter.id || ''))) {
+    throw new ProviderError(`Invalid ${layer} provider adapter`, 500, 'invalid_provider_adapter');
+  }
+  for (const method of requiredMethods[layer]) {
+    if (typeof adapter[method] !== 'function') {
+      throw new ProviderError(`${adapter.id} does not implement ${layer}.${method}`, 500, 'invalid_provider_adapter');
+    }
+  }
+  if (registries[layer][adapter.id] && !options.replace) {
+    throw new ProviderError(`${layer} provider ${adapter.id} is already registered`, 409, 'duplicate_provider');
+  }
+  registries[layer][adapter.id] = adapter;
+  return adapter;
 }
 
-// Convenience accessors for the live defaults.
-const tts = ttsRumik;
-const stt = sttDeepgram;
-const llm = llmGroq;
-const telephony = telVobiz;
+registerProvider('stt', sttDeepgram);
+registerProvider('tts', ttsRumik);
+registerProvider('llm', llmGroq);
+registerProvider('llm', llmGemini);
+registerProvider('telephony', telVobiz);
+
+function configuredDefaultId(layer) {
+  if (layer === 'stt') return 'deepgram';
+  const envName = `${layer.toUpperCase()}_PROVIDER`;
+  return String(process.env[envName] || ({ tts: 'rumik', llm: 'groq', telephony: 'vobiz' })[layer] || '').trim().toLowerCase();
+}
+
+function get(layer, id) {
+  if (!PROVIDER_LAYERS.has(layer)) {
+    throw new ProviderError(`Unknown provider layer: ${layer}`, 422, 'invalid_provider_layer');
+  }
+  const providerId = String(id || configuredDefaultId(layer)).trim().toLowerCase();
+  if (layer === 'stt' && providerId !== 'deepgram') {
+    throw new ProviderError('Deepgram is the only supported STT provider', 422, 'stt_provider_fixed');
+  }
+  const adapter = registries[layer][providerId];
+  if (!adapter) {
+    throw new ProviderError(`Unsupported ${layer} provider: ${providerId}`, 422, 'unsupported_provider');
+  }
+  return adapter;
+}
+
+// Resolve a tenant-safe selection. Only provider and model identifiers are
+// accepted. Provider secrets always come from server-side environment values.
+function resolveSelection(layer, selection = {}) {
+  if (!selection || typeof selection !== 'object' || Array.isArray(selection)) {
+    throw new ProviderError('Provider selection must be an object', 422, 'invalid_provider_selection');
+  }
+  const allowed = new Set(['provider', 'model']);
+  const secretLike = Object.keys(selection).find((key) => !allowed.has(key));
+  if (secretLike) {
+    throw new ProviderError(`Provider selection cannot include ${secretLike}`, 422, 'unsafe_provider_selection');
+  }
+  const adapter = get(layer, selection.provider);
+  const resolved = { provider: adapter.id, adapter };
+  if (layer === 'llm' || layer === 'tts' || layer === 'stt') {
+    resolved.model = selectedModel(adapter, selection.model);
+  }
+  return resolved;
+}
+
+// Convenience accessors preserve the existing route contract while making the
+// LLM and TTS defaults environment-selectable at process start.
+const stt = get('stt');
+const tts = get('tts');
+const llm = get('llm');
+const telephony = get('telephony');
 
 // Shape used by GET /api/providers so the UI can render active vs ready-to-wire.
 function describeProviders() {
@@ -583,7 +598,10 @@ function describeProviders() {
     out[layer] = Object.values(reg).map((a) => ({
       id: a.id,
       label: a.label,
+      implemented: true,
       live: a.live,
+      selected: a.id === configuredDefaultId(layer),
+      model: (layer === 'llm' || layer === 'tts' || layer === 'stt') ? selectedModel(a) : undefined,
       needs: a.needs,
     }));
   }
@@ -592,8 +610,8 @@ function describeProviders() {
 
 module.exports = {
   ProviderError,
-  registries, get, describeProviders,
+  registries, registerProvider, get, resolveSelection, describeProviders,
   stt, tts, llm, telephony,
   MAX_TEXT, TTS_MODELS, TTS_SPEAKERS,
-  BROWSER_UA,
+  BROWSER_UA, MODEL_ID_RE,
 };

@@ -25,16 +25,35 @@ Open the app and use Sign up to create an isolated tenant. For automated QA or a
 
 ## What "provider agnostic" means
 
-The product is built in four swappable layers. Each layer is a registry of adapters behind one uniform interface, so you change a provider by adding an env key, not by rewriting code.
+The product is built around strict adapter registries. The LLM and TTS layers accept the same internal contracts regardless of vendor, while secrets remain server-side. Provider and model IDs can be selected through trusted configuration without accepting an API key from a tenant or browser request. Unsupported IDs, malformed model IDs, and non-allowlisted models fail closed.
 
-| Layer | Live today | Ready to wire (add the env key) |
+| Layer | Implemented today | Selection |
 | --- | --- | --- |
-| **Transcription (STT)** | Deepgram Nova-3, live streaming | Additional STT adapters |
-| **Voice (TTS)** | Rumik silk | ElevenLabs, Sarvam |
-| **Brain (LLM)** | Groq, Llama 3.3 70B | Gemini, Claude |
-| **Telephony** | VoBiz through Dograh | Zoom, Twilio |
+| **Transcription (STT)** | Deepgram Nova-3, batch and live streaming | Intentionally fixed to Deepgram |
+| **Voice (TTS)** | Rumik silk, Muga and Mulberry | `TTS_PROVIDER`, `TTS_MODEL` |
+| **Brain (LLM)** | Groq and Google Gemini | `LLM_PROVIDER`, `LLM_MODEL` |
+| **Telephony** | VoBiz through Dograh | `TELEPHONY_PROVIDER` |
 
-The Settings screen reads `GET /api/providers` and shows which provider is active and which is ready to wire, with the exact env keys each one needs. Drop the key in `.env`, restart, and it goes live.
+`GET /api/providers` reports only adapters that actually ship in this repository. It never labels a placeholder as live. The response includes selected and configured state, model IDs, and required environment variable names, but never secret values.
+
+To add another LLM or TTS vendor, implement the layer methods in `lib/providers.js`, register the adapter with `registerProvider`, and add mocked contract tests. A TTS adapter implements `synthesize` and `wsConnect`. An LLM adapter implements `chat`. STT remains Deepgram-only by product decision.
+
+Rumik is the only TTS adapter implemented in this repository today. The contract is vendor-neutral, but the Settings screen does not claim that ElevenLabs, Sarvam, or another TTS works until its adapter and tests are shipped.
+
+Example server defaults:
+
+```dotenv
+LLM_PROVIDER=gemini
+LLM_MODEL=gemini-2.5-flash
+TTS_PROVIDER=rumik
+TTS_MODEL=mulberry
+```
+
+Optional `GROQ_ALLOWED_MODELS` and `GEMINI_ALLOWED_MODELS` comma-separated lists restrict model selection. When an allowlist exists, any model outside it is rejected before an upstream request.
+
+### Browser and phone workflow authority
+
+Dograh's published workflow is the authority for both browser WebRTC calls and phone calls. `LLM_PROVIDER` and `TTS_PROVIDER` configure dashboard-owned `/api/chat` and `/api/tts` requests. They do not rewrite an already published Dograh workflow. Per-agent or per-tenant switching inside a live call requires a distinct tenant-scoped Dograh workflow binding whose nodes use the chosen providers. Do not present a dashboard selection as active on an embed until that workflow binding exists.
 
 ## The economics
 

@@ -43,8 +43,9 @@ const State = {
   wallet: null,
   presets: [],
   tickets: [],
+  demoLinks: [],
   activeAgentId: null, // for Talk-to-it
-  loaded: { agents: false, providers: false, usage: false, telephony: false, wallet: false, presets: false, tickets: false }
+  loaded: { agents: false, providers: false, usage: false, telephony: false, wallet: false, presets: false, tickets: false, demoLinks: false }
 };
 
 const VOICE_MODELS = ['mulberry', 'muga'];
@@ -273,7 +274,8 @@ function renderAuth() {
 function resetData() {
   State.agents = []; State.providers = null; State.usage = null; State.telephony = null;
   State.wallet = null; State.presets = []; State.tickets = [];
-  State.loaded = { agents: false, providers: false, usage: false, telephony: false, wallet: false, presets: false, tickets: false };
+  State.demoLinks = [];
+  State.loaded = { agents: false, providers: false, usage: false, telephony: false, wallet: false, presets: false, tickets: false, demoLinks: false };
   State.activeAgentId = null;
 }
 
@@ -285,6 +287,7 @@ const ROUTES = [
   { id: 'agents', label: 'Agents', icon: 'users' },
   { id: 'presets', label: 'Presets', icon: 'template' },
   { id: 'studio', label: 'Voice Studio', icon: 'wave' },
+  { id: 'demos', label: 'Demo links', icon: 'link', ownerOnly: true },
   { id: 'talk', label: 'Talk to it', icon: 'mic' },
   { id: 'telephony', label: 'Telephony', icon: 'phone' },
   { id: 'billing', label: 'Billing', icon: 'wallet' },
@@ -305,6 +308,7 @@ function navIcon(name) {
     wallet: '<path d="M4 6.5h14a2 2 0 0 1 2 2v9H4a2 2 0 0 1-2-2v-11a2 2 0 0 0 2 2z"/><path d="M15 11h7v4h-7a2 2 0 0 1 0-4z"/>',
     support: '<path d="M4 13a8 8 0 0 1 16 0v5a2 2 0 0 1-2 2h-3"/><path d="M4 13v4H2v-4h2M20 13v4h2v-4h-2"/>',
     shield: '<path d="M12 3 20 6v6c0 5-3.4 8-8 9-4.6-1-8-4-8-9V6l8-3z"/><path d="m9 12 2 2 4-5"/>',
+    link: '<path d="M10.5 13.5a4 4 0 0 0 5.7 0l2.3-2.3a4 4 0 0 0-5.7-5.7l-1.3 1.3"/><path d="M13.5 10.5a4 4 0 0 0-5.7 0l-2.3 2.3a4 4 0 0 0 5.7 5.7l1.3-1.3"/>',
     logout: '<path d="M14 3.5H6.5A1.5 1.5 0 0 0 5 5v14a1.5 1.5 0 0 0 1.5 1.5H14"/><path d="M17 8l4 4-4 4"/><path d="M21 12H9"/>'
   };
   return '<svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">' + (paths[name] || paths.grid) + '</svg>';
@@ -315,7 +319,11 @@ function renderShell() {
   root.removeAttribute('aria-busy');
   const t = State.me.tenant, u = State.me.user;
 
-  const visibleRoutes = ROUTES.filter((r) => !r.adminOnly || u.role === 'super_admin' || u.role === 'admin');
+  const visibleRoutes = ROUTES.filter((r) => {
+    if (r.adminOnly && !['super_admin', 'admin'].includes(u.role)) return false;
+    if (r.ownerOnly && !['super_admin', 'admin', 'owner'].includes(u.role)) return false;
+    return true;
+  });
   const nav = el('nav', { class: 'nav' }, visibleRoutes.map((r) =>
     el('a', { href: '#/' + r.id, 'data-route': r.id, html: navIcon(r.icon) + '<span>' + esc(r.label) + '</span>' })
   ));
@@ -427,7 +435,9 @@ function paintHealth() {
    =========================================================================== */
 function currentRoute() {
   const hash = (location.hash || '').replace(/^#\/?/, '').split('?')[0];
-  const found = ROUTES.find((r) => r.id === hash && (!r.adminOnly || (State.me && ['super_admin', 'admin'].includes(State.me.user.role))));
+  const found = ROUTES.find((r) => r.id === hash &&
+    (!r.adminOnly || (State.me && ['super_admin', 'admin'].includes(State.me.user.role))) &&
+    (!r.ownerOnly || (State.me && ['super_admin', 'admin', 'owner'].includes(State.me.user.role))));
   return found ? found.id : 'overview';
 }
 function onRoute() {
@@ -442,7 +452,7 @@ function onRoute() {
   const wrap = el('div', { class: 'view' });
   view.appendChild(wrap);
   ({
-    overview: viewOverview, agents: viewAgents, presets: viewPresets, studio: viewStudio,
+    overview: viewOverview, agents: viewAgents, presets: viewPresets, studio: viewStudio, demos: viewDemoLinks,
     talk: viewTalk, telephony: viewTelephony, billing: viewBilling,
     support: viewSupport, admin: viewAdmin, settings: viewSettings
   }[id] || viewOverview)(wrap);
@@ -1108,7 +1118,144 @@ async function streamSynthesize(text, st, canvas, btn) {
 }
 
 /* ===========================================================================
-   4. TALK TO IT
+   4. DEMO LINKS
+   =========================================================================== */
+async function viewDemoLinks(root) {
+  root.appendChild(viewHead('Demo links', 'Create a tenant-branded web voice experience for one agent, then share it without exposing Studio access or provider secrets.'));
+  const grid = el('div', { class: 'demo-admin-grid' }, [
+    el('div', { class: 'card demo-create-card', id: 'demoCreateHost' }),
+    el('div', { class: 'card demo-list-card', id: 'demoListHost' })
+  ]);
+  root.appendChild(grid);
+
+  const createHost = $('#demoCreateHost', root);
+  const listHost = $('#demoListHost', root);
+  createHost.appendChild(skeleton('sk-card', 1));
+  listHost.appendChild(skeleton('sk-card', 1));
+
+  try {
+    await ensureAgents();
+    const payload = await api('/api/demo-links');
+    State.demoLinks = payload.demoLinks || [];
+    State.loaded.demoLinks = true;
+  } catch (error) {
+    createHost.innerHTML = '';
+    listHost.innerHTML = '';
+    listHost.appendChild(el('div', { class: 'demo-error', role: 'alert' }, error.message || 'Demo links could not be loaded.'));
+    return;
+  }
+
+  function ephemeralUrl(id) {
+    try { return sessionStorage.getItem('rxv_demo_' + id) || ''; } catch (_) { return ''; }
+  }
+  function rememberUrl(id, url) {
+    try { sessionStorage.setItem('rxv_demo_' + id, url); } catch (_) {}
+  }
+  async function copyUrl(url) {
+    if (!url) return;
+    try { await navigator.clipboard.writeText(url); toast('Demo link copied.', 'ok'); }
+    catch (_) {
+      const input = el('textarea', { style: 'position:fixed;opacity:0;pointer-events:none' }, url);
+      document.body.appendChild(input); input.select(); document.execCommand('copy'); input.remove();
+      toast('Demo link copied.', 'ok');
+    }
+  }
+  function openUrl(url) {
+    if (url) window.open(url, '_blank', 'noopener,noreferrer');
+  }
+  function redraw() {
+    root.innerHTML = '';
+    viewDemoLinks(root);
+  }
+
+  createHost.innerHTML = '';
+  createHost.appendChild(el('div', { class: 'demo-card-head' }, [
+    el('div', {}, [el('h3', { class: 't-h3' }, 'Create a share link'), el('p', { class: 'muted' }, 'The full URL is shown once. Only its SHA-256 hash is stored on the server.')])
+  ]));
+  if (!State.agents.length) {
+    createHost.appendChild(el('div', { class: 'empty' }, [
+      el('div', { class: 'ttl' }, 'Create an agent first'),
+      el('p', {}, 'A demo link must be scoped to one tenant-owned agent.'),
+      el('button', { class: 'btn btn-primary', onclick: () => goto('agents') }, 'Open agents')
+    ]));
+  } else {
+    const agent = el('select', { class: 'select', id: 'demoAgent' }, State.agents.map((item) => el('option', { value: item.id }, item.name)));
+    const label = el('input', { class: 'input', id: 'demoLabel', maxlength: '80', placeholder: 'Prospect demo' });
+    const expiry = el('select', { class: 'select', id: 'demoExpiry' }, [1, 3, 7, 14, 30].map((days) => el('option', { value: days, selected: days === 7 ? 'selected' : false }, days + (days === 1 ? ' day' : ' days'))));
+    const duration = el('select', { class: 'select', id: 'demoDuration' }, [60, 180, 300, 600].map((seconds) => el('option', { value: seconds, selected: seconds === 300 ? 'selected' : false }, Math.round(seconds / 60) + (seconds === 60 ? ' minute' : ' minutes'))));
+    const starts = el('input', { class: 'input', id: 'demoStarts', type: 'number', min: '1', max: '1000', value: '25', inputmode: 'numeric' });
+    const submit = el('button', { class: 'btn btn-primary btn-lg', type: 'submit' }, 'Create demo link');
+    const form = el('form', { class: 'demo-create-form' }, [
+      el('div', { class: 'field full' }, [el('label', {}, 'Agent'), agent]),
+      el('div', { class: 'field full' }, [el('label', {}, 'Internal label'), label]),
+      el('div', { class: 'field' }, [el('label', {}, 'Expires after'), expiry]),
+      el('div', { class: 'field' }, [el('label', {}, 'Call duration'), duration]),
+      el('div', { class: 'field full' }, [el('label', {}, 'Maximum starts'), starts]),
+      submit
+    ]);
+    form.addEventListener('submit', async (event) => {
+      event.preventDefault(); submit.disabled = true; submit.textContent = 'Creating...';
+      try {
+        const result = await api('/api/demo-links', { method: 'POST', body: {
+          agentId: agent.value, label: label.value.trim(), expiresInDays: Number(expiry.value),
+          maxSessionSeconds: Number(duration.value), maxStarts: Number(starts.value)
+        } });
+        const fullUrl = location.origin + result.sharePath;
+        rememberUrl(result.demoLink.id, fullUrl);
+        State.demoLinks.unshift(result.demoLink);
+        await copyUrl(fullUrl);
+        toast('Created and copied. Open it in a separate tab to test.', 'ok', 'Demo ready');
+        redraw();
+      } catch (error) {
+        toast(error.message || 'Demo link could not be created.', 'err');
+        submit.disabled = false; submit.textContent = 'Create demo link';
+      }
+    });
+    createHost.appendChild(form);
+  }
+
+  listHost.innerHTML = '';
+  listHost.appendChild(el('div', { class: 'demo-card-head' }, [
+    el('div', {}, [el('h3', { class: 't-h3' }, 'Distributed demos'), el('p', { class: 'muted' }, 'Revoke access immediately or create a replacement when a one-time URL is no longer available.')]),
+    el('span', { class: 'tag' }, State.demoLinks.length + ' total')
+  ]));
+  if (!State.demoLinks.length) {
+    listHost.appendChild(el('div', { class: 'empty' }, [el('div', { class: 'ttl' }, 'No demo links yet'), el('p', {}, 'Create one to share a branded web voice experience.') ]));
+  } else {
+    const agentNames = Object.fromEntries(State.agents.map((item) => [item.id, item.name]));
+    const list = el('div', { class: 'demo-link-list' });
+    State.demoLinks.forEach((item) => {
+      const url = ephemeralUrl(item.id);
+      const status = item.status || 'active';
+      const card = el('article', { class: 'demo-link-row' }, [
+        el('div', { class: 'demo-link-main' }, [
+          el('div', { class: 'demo-link-title' }, [el('strong', {}, item.label), el('span', { class: 'demo-status ' + status }, status)]),
+          el('div', { class: 'demo-link-meta' }, [
+            el('span', {}, agentNames[item.agentId] || 'Agent'),
+            el('span', {}, item.starts + ' of ' + item.maxStarts + ' starts'),
+            el('span', {}, 'Expires ' + new Date(item.expiresAt).toLocaleDateString())
+          ]),
+          !url && status === 'active' ? el('p', { class: 'demo-once-note' }, 'The secret URL is not recoverable after this browser session. Revoke and replace it if needed.') : null
+        ]),
+        el('div', { class: 'demo-link-actions' }, [
+          el('button', { class: 'btn btn-ghost', disabled: !url ? 'disabled' : false, onclick: () => openUrl(url) }, 'Open'),
+          el('button', { class: 'btn btn-ghost', disabled: !url ? 'disabled' : false, onclick: () => copyUrl(url) }, 'Copy'),
+          status === 'active' ? el('button', { class: 'btn btn-danger-soft', onclick: () => modal({
+            title: 'Revoke this demo link?',
+            body: el('p', { class: 'muted' }, 'Visitors will no longer be able to start a voice session with this URL.'),
+            confirmText: 'Revoke link', confirmKind: 'danger',
+            onConfirm: async () => { await api('/api/demo-links/revoke', { method: 'POST', body: { id: item.id } }); try { sessionStorage.removeItem('rxv_demo_' + item.id); } catch (_) {} toast('Demo link revoked.', 'ok'); redraw(); }
+          }) }, 'Revoke') : null
+        ])
+      ]);
+      list.appendChild(card);
+    });
+    listHost.appendChild(list);
+  }
+}
+
+/* ===========================================================================
+   5. TALK TO IT
    =========================================================================== */
 async function viewTalk(root) {
   root.appendChild(viewHead('Talk to your agent', 'A direct realtime voice call through the same Dograh workflow runtime used on the phone.'));

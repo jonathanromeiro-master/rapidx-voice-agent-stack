@@ -258,6 +258,45 @@
 .streamtoggle input { accent-color: var(--accent); width: 16px; height: 16px; }
 
 /* =========================================================
+   DEMO LINKS
+   ========================================================= */
+.demo-admin-grid { display: grid; grid-template-columns: minmax(280px, .82fr) minmax(0, 1.55fr); gap: 18px; align-items: start; }
+.demo-create-card, .demo-list-card { padding: 24px; }
+.demo-card-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 20px; }
+.demo-card-head .muted { margin-top: 5px; font-size: .83rem; line-height: 1.5; }
+.demo-create-form { display: grid; grid-template-columns: 1fr 1fr; gap: 15px; }
+.demo-create-form .full, .demo-create-form > .btn { grid-column: 1 / -1; }
+.demo-link-list { display: flex; flex-direction: column; }
+.demo-link-row { display: flex; align-items: center; justify-content: space-between; gap: 18px; padding: 17px 0; border-top: 1px solid var(--line); }
+.demo-link-row:first-child { border-top: 0; padding-top: 0; }
+.demo-link-main { min-width: 0; }
+.demo-link-title { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; }
+.demo-link-title strong { font-size: .94rem; letter-spacing: -.015em; }
+.demo-status { display: inline-flex; align-items: center; padding: 3px 8px; border-radius: var(--r-pill); background: var(--bg-2); color: var(--ink-dim); font-size: .66rem; font-family: var(--mono); text-transform: uppercase; letter-spacing: .04em; }
+.demo-status.active { color: #08714e; background: rgba(16,185,129,.11); }
+.demo-status.revoked, .demo-status.expired, .demo-status.exhausted { color: #a52d3d; background: rgba(225,29,72,.08); }
+.demo-link-meta { display: flex; flex-wrap: wrap; gap: 7px 14px; margin-top: 7px; color: var(--ink-dim); font-size: .75rem; }
+.demo-link-meta span { position: relative; }
+.demo-link-meta span + span::before { content: ""; width: 3px; height: 3px; border-radius: 50%; background: var(--ink-faint); position: absolute; left: -9px; top: 50%; }
+.demo-once-note { margin-top: 8px; max-width: 58ch; color: var(--ink-faint); font-size: .72rem; line-height: 1.45; }
+.demo-link-actions { display: flex; gap: 7px; flex: 0 0 auto; }
+.btn-danger-soft { border: 1px solid rgba(225,29,72,.2); background: rgba(225,29,72,.06); color: #a52d3d; }
+.btn-danger-soft:hover { background: rgba(225,29,72,.1); }
+.demo-error { border: 1px solid rgba(225,29,72,.2); background: rgba(225,29,72,.05); color: #a52d3d; border-radius: var(--r); padding: 14px; font-size: .85rem; }
+
+@media (max-width: 980px) {
+  .demo-admin-grid { grid-template-columns: 1fr; }
+}
+@media (max-width: 620px) {
+  .demo-create-card, .demo-list-card { padding: 19px; }
+  .demo-create-form { grid-template-columns: 1fr; }
+  .demo-create-form .full, .demo-create-form > .btn { grid-column: auto; }
+  .demo-link-row { align-items: flex-start; flex-direction: column; }
+  .demo-link-actions { width: 100%; }
+  .demo-link-actions .btn { flex: 1; min-height: 44px; }
+}
+
+/* =========================================================
    TALK TO IT
    ========================================================= */
 .talk-grid { display: grid; grid-template-columns: 1fr 320px; gap: 18px; align-items: start; }

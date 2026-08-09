@@ -82,6 +82,21 @@
 - [x] Admin can list, reply, and change status.
 - [x] Ticket messages render as text and resist stored XSS.
 
+## Demo links
+
+- [x] Owner or higher can create, list and revoke a tenant-scoped link for one tenant-owned agent.
+- [x] Secret URLs are returned once and the database stores only a SHA-256 token hash.
+- [x] Public metadata omits provider secrets, agent personas, users, wallet, billing and admin data.
+- [x] Revoked, expired and exhausted links fail closed.
+- [x] Expiry, start count and duration inputs are server clamped.
+- [x] Concurrent session starts reserve capacity through the serialized store before minting upstream sessions.
+- [x] Public starts have a separate rate limit and same-origin proxied TURN credentials.
+- [x] Public UI covers loading, idle, connecting, listening, thinking, speaking, ended and error states.
+- [x] Public page releases media tracks, WebSocket, peer connection and timers on end or page exit.
+- [x] Studio and public demo surfaces adapt at 375, 768 and 1280 px widths.
+- [ ] Enforce the server-selected maximum duration inside the upstream Dograh workflow, in addition to browser cleanup.
+- [ ] Complete a real visitor microphone, greeting, interruption and reply test against production after deployment.
+
 ## QA and production proof
 
 - [x] Automated tests cover schema, role hierarchy, PayU hashing, callback tampering, and browser no-credit behavior.

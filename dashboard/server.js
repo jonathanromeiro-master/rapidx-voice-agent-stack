@@ -19,12 +19,18 @@ const path = require('path');
 const { WebSocketServer, WebSocket } = require('ws');
 
 const core = require('./lib/core');
+core.loadEnv();
 const providers = require('./lib/providers');
 const payu = require('./lib/payu');
-
-core.loadEnv();
+const demoLinks = require('./lib/demo-links');
 
 const PORT = parseInt(process.env.PORT || '8787', 10);
+const DEFAULT_PROVIDERS = Object.freeze({
+  stt: providers.stt.id,
+  tts: providers.tts.id,
+  llm: providers.llm.id,
+  telephony: providers.telephony.id,
+});
 
 /* ==========================================================================
    Boot: ensure data/ + db.json, seed the demo tenant, migrate legacy agents.
@@ -136,7 +142,7 @@ function readLegacyAgents() {
 // Normalize a legacy agent (flat model/speaker/created) into the SPEC shape
 // (nested tts object, createdAt ISO), scoped to the given tenant.
 function migrateLegacyAgent(legacy, tenantId) {
-  const model = legacy.model === 'muga' ? 'muga' : 'mulberry';
+  const model = legacy.model === 'muga' ? 'muga' : providers.tts.model;
   const speaker = providers.TTS_SPEAKERS.has(legacy.speaker) ? legacy.speaker : 'speaker_1';
   return {
     id: legacy.id || core.genId('ag_'),
@@ -144,7 +150,7 @@ function migrateLegacyAgent(legacy, tenantId) {
     name: String(legacy.name || 'Untitled Agent').slice(0, 60),
     persona: String(legacy.persona || '').slice(0, 1500),
     tts: {
-      provider: 'rumik',
+      provider: providers.tts.id,
       model,
       speaker,
       f0_up_key: Number.isFinite(legacy.f0_up_key) ? legacy.f0_up_key : 0,
@@ -179,7 +185,7 @@ async function boot() {
         slug: makeSlug(DEMO_TENANT, new Set(d.tenants.map((t) => t.slug))),
         createdAt: nowIso,
         branding: { color: '#6E7BFF' },
-        providers: { stt: 'deepgram', tts: 'rumik', llm: 'groq', telephony: 'vobiz' },
+        providers: { ...DEFAULT_PROVIDERS },
         plan: 'studio',
         status: 'active', privacyMode: 'standard',
       });
@@ -210,11 +216,13 @@ async function boot() {
     });
   }
 
-  // Move existing Studio tenants onto the same production voice-call stack.
-  if (core.db().tenants.some((t) => !t.providers || t.providers.stt !== 'deepgram' || t.providers.llm !== 'groq')) {
+  // Fill missing or stale selections from the configured adapter defaults.
+  // Existing valid selections remain intact so boot never forces a tenant back
+  // to one specific LLM or TTS provider.
+  if (core.db().tenants.some((t) => !t.providers || !t.providers.stt || !t.providers.tts || !t.providers.llm || !t.providers.telephony)) {
     await core.mutate((d) => {
       d.tenants.forEach((t) => {
-        t.providers = { ...(t.providers || {}), stt: 'deepgram', tts: 'rumik', llm: 'groq', telephony: 'vobiz' };
+        t.providers = { ...DEFAULT_PROVIDERS, ...(t.providers || {}) };
       });
     });
   }
@@ -317,7 +325,7 @@ async function apiSignup(req, res, body) {
     tenant = {
       id: tenantId, name: company, slug: makeSlug(company, taken), createdAt: nowIso,
       branding: { color: '#6E7BFF' },
-      providers: { stt: 'deepgram', tts: 'rumik', llm: 'groq', telephony: 'vobiz' },
+      providers: { ...DEFAULT_PROVIDERS },
       plan: 'studio',
       status: 'active', privacyMode: 'standard',
     };
@@ -457,7 +465,7 @@ async function apiAgentsCreate(req, res, ctx) {
   const preset = b.presetId ? core.db().presets.find((p) => p.id === String(b.presetId) && (p.isSystem || p.tenantId === ctx.tenant.id)) : null;
   if (b.presetId && !preset) return core.sendJson(res, 404, { error: 'preset not found', code: 'not_found' });
   const ttsIn = b.tts || {};
-  const model = ttsIn.model === 'muga' ? 'muga' : 'mulberry';
+  const model = ttsIn.model === 'muga' ? 'muga' : providers.tts.model;
   const speaker = providers.TTS_SPEAKERS.has(ttsIn.speaker) ? ttsIn.speaker : 'speaker_1';
   const f0 = Number.isFinite(ttsIn.f0_up_key) ? Math.max(-12, Math.min(12, ttsIn.f0_up_key | 0)) : 0;
 
@@ -466,7 +474,7 @@ async function apiAgentsCreate(req, res, ctx) {
     tenantId: ctx.tenant.id,
     name: String(b.name || (preset && preset.name) || 'Untitled Agent').slice(0, 60),
     persona: String(b.persona || (preset ? `${preset.name}. Collect: ${preset.fields.join(', ')}. Guardrails: ${preset.guardrails.join('; ')}.` : '')).slice(0, 1500),
-    tts: { provider: 'rumik', model, speaker, f0_up_key: f0 },
+    tts: { provider: providers.tts.id, model, speaker, f0_up_key: f0 },
     greeting: String(b.greeting || (preset && preset.greeting) || '').slice(0, 300),
     presetId: preset ? preset.id : null,
     telephony: { did: String(b.did || providers.telephony.did).replace(/[^0-9]/g, '') || providers.telephony.did },
@@ -496,11 +504,11 @@ async function apiAgentsUpdate(req, res, ctx) {
       a.telephony = { ...(a.telephony || {}), did: did || providers.telephony.did };
     }
     if (b.tts && typeof b.tts === 'object') {
-      const t = a.tts || { provider: 'rumik' };
-      if (b.tts.model != null) t.model = b.tts.model === 'muga' ? 'muga' : 'mulberry';
+      const t = a.tts || { provider: providers.tts.id };
+      if (b.tts.model != null) t.model = b.tts.model === 'muga' ? 'muga' : providers.tts.model;
       if (providers.TTS_SPEAKERS.has(b.tts.speaker)) t.speaker = b.tts.speaker;
       if (Number.isFinite(b.tts.f0_up_key)) t.f0_up_key = Math.max(-12, Math.min(12, b.tts.f0_up_key | 0));
-      t.provider = 'rumik';
+      t.provider = providers.tts.id;
       a.tts = t;
     }
     updated = a;
@@ -523,9 +531,10 @@ async function apiAgentsDelete(req, res, ctx) {
 async function apiTts(req, res, ctx) {
   const b = ctx.body || {};
   try {
-    const out = await providers.tts.synthesize({
+    const selected = providers.resolveSelection('tts', { provider: b.provider, model: b.model });
+    const out = await selected.adapter.synthesize({
       text: b.text,
-      model: b.model,
+      model: selected.model,
       speaker: b.speaker,
       f0_up_key: b.f0_up_key,
       description: b.description,
@@ -547,8 +556,9 @@ async function apiTts(req, res, ctx) {
 async function apiWsConnect(req, res, ctx) {
   const b = ctx.body || {};
   try {
-    const data = await providers.tts.wsConnect({ text: b.text, model: b.model });
-    core.sendJson(res, 200, data);
+    const selected = providers.resolveSelection('tts', { provider: b.provider, model: b.model });
+    const data = await selected.adapter.wsConnect({ text: b.text, model: selected.model });
+    core.sendJson(res, 200, { ...data, provider: selected.provider, model: selected.model });
   } catch (e) {
     handleProviderError(res, e);
   }
@@ -558,7 +568,8 @@ async function apiWsConnect(req, res, ctx) {
 async function apiChat(req, res, ctx) {
   const b = ctx.body || {};
   try {
-    const out = await providers.llm.chat({ messages: b.messages, system: b.system });
+    const selected = providers.resolveSelection('llm', { provider: b.provider, model: b.model });
+    const out = await selected.adapter.chat({ messages: b.messages, system: b.system, model: selected.model });
     // Rough token accounting for the usage view (4 chars ~= 1 token).
     const approxTokens = Math.ceil((out.text || '').length / 4);
     bumpUsage(ctx.tenant.id, 'llmTokens', approxTokens).catch(() => {});
@@ -579,49 +590,165 @@ async function apiStt(req, res, ctx) {
   }
 }
 
-async function apiVoiceSession(req, res, ctx) {
+async function mintDograhVoiceSession(req, context) {
   const token = String(process.env.DOGRAH_EMBED_TOKEN || '').trim();
   const base = String(process.env.DOGRAH_BASE_URL || '').replace(/\/$/, '');
-  if (!token || !base) return core.sendJson(res, 503, { error: 'realtime voice session is not configured', code: 'voice_session_unavailable' });
+  if (!token || !base) {
+    const error = new Error('realtime voice session is not configured');
+    error.status = 503; error.code = 'voice_session_unavailable'; throw error;
+  }
   const requestOrigin = String(req.headers.origin || `https://${req.headers.host || ''}`);
-  try {
-    const upstream = await fetch(base + '/api/v1/public/embed/init', {
-      method: 'POST', headers: { 'Content-Type': 'application/json', Origin: requestOrigin },
-      body: JSON.stringify({ token, context_variables: { source: 'rumik_studio', tenant_id: String(ctx.tenant.id), agent_id: String((ctx.body || {}).agentId || '') } }),
-      signal: AbortSignal.timeout(12000),
-    });
-    const text = await upstream.text(); let data = {};
-    try { data = JSON.parse(text); } catch (_) {}
-    if (!upstream.ok) return core.sendJson(res, upstream.status, { error: String(data.detail || 'Dograh could not start the realtime voice session'), code: 'voice_session_failed' });
-    const sessionToken = String(data.session_token || '');
-    let turnCredentials = null;
-    if (sessionToken) {
-      try {
-        const turnUpstream = await fetch(base + '/api/v1/public/embed/turn-credentials/' + encodeURIComponent(sessionToken), {
-          method: 'GET', headers: { Origin: requestOrigin }, signal: AbortSignal.timeout(8000),
-        });
-        if (turnUpstream.ok) {
-          const turnData = await turnUpstream.json();
-          if (Array.isArray(turnData.uris) && turnData.uris.length && turnData.username && turnData.password) {
-            turnCredentials = {
-              uris: turnData.uris,
-              username: String(turnData.username),
-              password: String(turnData.password),
-              ttl: Number(turnData.ttl || 0),
-            };
-          }
+  const upstream = await fetch(base + '/api/v1/public/embed/init', {
+    method: 'POST', headers: { 'Content-Type': 'application/json', Origin: requestOrigin },
+    body: JSON.stringify({ token, context_variables: {
+      source: String(context.source || 'rumik_studio'),
+      tenant_id: String(context.tenantId || ''),
+      agent_id: String(context.agentId || ''),
+      demo_link_id: String(context.demoLinkId || ''),
+      max_session_seconds: String(context.maxSessionSeconds || ''),
+    } }),
+    signal: AbortSignal.timeout(12000),
+  });
+  const text = await upstream.text(); let data = {};
+  try { data = JSON.parse(text); } catch (_) {}
+  if (!upstream.ok) {
+    const error = new Error(String(data.detail || 'Dograh could not start the realtime voice session'));
+    error.status = upstream.status; error.code = 'voice_session_failed'; throw error;
+  }
+  const sessionToken = String(data.session_token || '');
+  let turnCredentials = null;
+  if (sessionToken) {
+    try {
+      const turnUpstream = await fetch(base + '/api/v1/public/embed/turn-credentials/' + encodeURIComponent(sessionToken), {
+        method: 'GET', headers: { Origin: requestOrigin }, signal: AbortSignal.timeout(8000),
+      });
+      if (turnUpstream.ok) {
+        const turnData = await turnUpstream.json();
+        if (Array.isArray(turnData.uris) && turnData.uris.length && turnData.username && turnData.password) {
+          turnCredentials = {
+            uris: turnData.uris,
+            username: String(turnData.username),
+            password: String(turnData.password),
+            ttl: Number(turnData.ttl || 0),
+          };
         }
-      } catch (_) {}
-    }
-    core.sendJson(res, 200, {
-      sessionToken: data.session_token, workflowRunId: data.workflow_run_id,
-      workflowId: data.config && data.config.workflow_id,
-      signalingUrl: base.replace(/^http/, 'ws') + '/api/v1/ws/public/signaling/' + encodeURIComponent(data.session_token),
-      turnCredentialsUrl: base + '/api/v1/public/embed/turn-credentials/' + encodeURIComponent(data.session_token),
-      turnCredentials,
-      runtime: 'Dograh SmallWebRTC',
+      }
+    } catch (_) {}
+  }
+  return {
+    sessionToken: data.session_token, workflowRunId: data.workflow_run_id,
+    workflowId: data.config && data.config.workflow_id,
+    signalingUrl: base.replace(/^http/, 'ws') + '/api/v1/ws/public/signaling/' + encodeURIComponent(data.session_token),
+    turnCredentials,
+    runtime: 'Dograh SmallWebRTC',
+  };
+}
+
+async function apiVoiceSession(req, res, ctx) {
+  try {
+    const session = await mintDograhVoiceSession(req, {
+      source: 'rumik_studio', tenantId: ctx.tenant.id, agentId: (ctx.body || {}).agentId,
     });
-  } catch (_) { core.sendJson(res, 502, { error: 'Dograh realtime voice session failed', code: 'voice_session_failed' }); }
+    core.sendJson(res, 200, session);
+  } catch (error) {
+    core.sendJson(res, error.status || 502, { error: error.message || 'Dograh realtime voice session failed', code: error.code || 'voice_session_failed' });
+  }
+}
+
+function tenantDemoLinks(tenantId) {
+  return core.db().demoLinks.filter((link) => link.tenantId === tenantId);
+}
+
+function apiDemoLinksList(req, res, ctx) {
+  const links = tenantDemoLinks(ctx.tenant.id)
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+    .map((link) => demoLinks.publicDemoLink(link));
+  core.sendJson(res, 200, { demoLinks: links });
+}
+
+async function apiDemoLinksCreate(req, res, ctx) {
+  if (rejectImpersonated(res, ctx)) return;
+  const body = ctx.body || {};
+  const agent = core.db().agents.find((item) => item.id === String(body.agentId || '') && item.tenantId === ctx.tenant.id);
+  if (!agent) return core.sendJson(res, 404, { error: 'agent not found', code: 'not_found' });
+  const generated = demoLinks.createDemoToken();
+  const limits = demoLinks.normalizeDemoLimits(body);
+  const link = {
+    id: generated.id, tokenHash: generated.tokenHash, tenantId: ctx.tenant.id, agentId: agent.id,
+    label: String(body.label || `${agent.name} demo`).trim().slice(0, 80) || `${agent.name} demo`,
+    status: 'active', starts: 0, createdBy: ctx.user.id, createdAt: new Date().toISOString(),
+    ...limits,
+  };
+  await core.mutate((database) => {
+    database.demoLinks.push(link);
+    addAudit(database, ctx, 'demo_link.created', 'demo_link', link.id, { agentId: agent.id, expiresAt: link.expiresAt, maxStarts: link.maxStarts });
+  });
+  core.sendJson(res, 201, { demoLink: demoLinks.publicDemoLink(link), sharePath: `/demo/${generated.token}` });
+}
+
+async function apiDemoLinksRevoke(req, res, ctx) {
+  if (rejectImpersonated(res, ctx)) return;
+  const id = String((ctx.body || {}).id || '');
+  const link = core.db().demoLinks.find((item) => item.id === id && item.tenantId === ctx.tenant.id);
+  if (!link) return core.sendJson(res, 404, { error: 'demo link not found', code: 'not_found' });
+  await core.mutate((database) => {
+    const target = database.demoLinks.find((item) => item.id === id && item.tenantId === ctx.tenant.id);
+    target.status = 'revoked'; target.revokedAt = new Date().toISOString(); target.revokedBy = ctx.user.id;
+    addAudit(database, ctx, 'demo_link.revoked', 'demo_link', id, { agentId: target.agentId });
+  });
+  core.sendJson(res, 200, { ok: true });
+}
+
+function publicDemoContext(token) {
+  const database = core.db();
+  const link = demoLinks.findDemoLink(database, token);
+  if (!link) return null;
+  const tenant = database.tenants.find((item) => item.id === link.tenantId && item.status === 'active');
+  const agent = database.agents.find((item) => item.id === link.agentId && item.tenantId === link.tenantId);
+  if (!tenant || !agent) return null;
+  const color = String((tenant.branding || {}).color || '#B88A2D');
+  return { link, tenant, agent, color: /^#[0-9A-Fa-f]{6}$/.test(color) ? color : '#B88A2D' };
+}
+
+function apiPublicDemoMeta(req, res, token) {
+  const context = publicDemoContext(token);
+  if (!context) return core.sendJson(res, 404, { error: 'demo link not found', code: 'not_found' });
+  const status = demoLinks.demoLinkStatus(context.link);
+  core.sendJson(res, 200, {
+    demo: { id: context.link.id, label: context.link.label, status, expiresAt: context.link.expiresAt, maxSessionSeconds: context.link.maxSessionSeconds },
+    brand: { name: context.tenant.name, color: context.color },
+    agent: { name: context.agent.name, greeting: String(context.agent.greeting || '').slice(0, 300) },
+  });
+}
+
+async function apiPublicDemoSession(req, res, token) {
+  const context = publicDemoContext(token);
+  if (!context) return core.sendJson(res, 404, { error: 'demo link not found', code: 'not_found' });
+  let reserved = false;
+  try {
+    await core.mutate((database) => {
+      const target = database.demoLinks.find((item) => item.id === context.link.id);
+      const status = demoLinks.demoLinkStatus(target);
+      if (status !== 'active') {
+        const error = new Error(`this demo link is ${status}`);
+        error.status = 410; error.code = `demo_${status}`; throw error;
+      }
+      target.starts = Number(target.starts || 0) + 1;
+      target.lastStartedAt = new Date().toISOString();
+      reserved = true;
+    });
+    const session = await mintDograhVoiceSession(req, {
+      source: 'public_demo', tenantId: context.tenant.id, agentId: context.agent.id,
+      demoLinkId: context.link.id, maxSessionSeconds: context.link.maxSessionSeconds,
+    });
+    core.sendJson(res, 200, { ...session, maxSessionSeconds: context.link.maxSessionSeconds });
+  } catch (error) {
+    if (reserved) await core.mutate((database) => {
+      const target = database.demoLinks.find((item) => item.id === context.link.id);
+      if (target) target.starts = Math.max(0, Number(target.starts || 0) - 1);
+    }).catch(() => {});
+    core.sendJson(res, error.status || 502, { error: error.message || 'realtime demo failed', code: error.code || 'voice_session_failed' });
+  }
 }
 
 // GET /api/telephony/status -> VoBiz configuration status from Dograh.
@@ -955,15 +1082,25 @@ function apiProviders(req, res) {
 
 // GET /api/health -> readiness + which provider keys are present.
 function apiHealth(req, res) {
+  const described = providers.describeProviders();
+  const providerHealth = (layer) => Object.fromEntries((described[layer] || []).map((item) => [item.id, item.live]));
+  const selected = (layer) => (described[layer] || []).find((item) => item.selected) || (described[layer] || [])[0] || {};
+  const selectedStt = selected('stt'); const selectedTts = selected('tts'); const selectedLlm = selected('llm'); const selectedTelephony = selected('telephony');
   core.sendJson(res, 200, {
     ok: true,
     providers: {
-      stt: { deepgram: providers.stt.live },
-      tts: { rumik: providers.tts.live },
-      llm: { groq: providers.llm.live },
-      telephony: { vobiz: providers.telephony.live },
+      stt: providerHealth('stt'),
+      tts: providerHealth('tts'),
+      llm: providerHealth('llm'),
+      telephony: providerHealth('telephony'),
     },
-    models: { stt: providers.stt.model, llm: providers.llm.model, tts: 'mulberry' },
+    models: { stt: selectedStt.model, llm: selectedLlm.model, tts: selectedTts.model },
+    selected: {
+      stt: { provider: selectedStt.id, model: selectedStt.model },
+      tts: { provider: selectedTts.id, model: selectedTts.model },
+      llm: { provider: selectedLlm.id, model: selectedLlm.model },
+      telephony: { provider: selectedTelephony.id },
+    },
   });
 }
 
@@ -1003,6 +1140,11 @@ const server = http.createServer(async (req, res) => {
       // ---- Public GET routes ----
       if (route === '/api/health' && req.method === 'GET') return apiHealth(req, res);
       if (route === '/api/providers' && req.method === 'GET') return apiProviders(req, res);
+      if (route.startsWith('/api/public/demo/') && req.method === 'GET') {
+        const token = decodeURIComponent(route.slice('/api/public/demo/'.length));
+        if (token.includes('/')) return core.sendJson(res, 404, { error: 'demo link not found', code: 'not_found' });
+        return apiPublicDemoMeta(req, res, token);
+      }
 
       // ---- Authed GET routes ----
       if (req.method === 'GET') {
@@ -1018,6 +1160,7 @@ const server = http.createServer(async (req, res) => {
         if (route === '/api/privacy') return core.requireAuth(req, res, apiPrivacyGet);
         if (route === '/api/members') return core.requireRole(req, res, 'owner', apiMembers);
         if (route === '/api/audit') return core.requireRole(req, res, 'owner', apiAudit);
+        if (route === '/api/demo-links') return core.requireRole(req, res, 'owner', apiDemoLinksList);
         if (route === '/api/admin/overview') return core.requireRole(req, res, 'super_admin', apiAdminOverview);
         if (route === '/api/admin/tenants') return core.requireRole(req, res, 'super_admin', apiAdminTenants);
         if (route === '/api/admin/users') return core.requireRole(req, res, 'super_admin', apiAdminUsers);
@@ -1051,6 +1194,11 @@ const server = http.createServer(async (req, res) => {
       if (route === '/api/auth/login') return apiLogin(req, res, body);
       if (route === '/api/auth/logout') return apiLogout(req, res);
       if (route === '/api/auth/impersonation/exit') return core.requireAuth(req, res, apiImpersonationExit, body);
+      if (route.startsWith('/api/public/demo/') && route.endsWith('/session')) {
+        const token = decodeURIComponent(route.slice('/api/public/demo/'.length, -'/session'.length));
+        if (token.includes('/') || !core.rateOk(`demo-start:${ip}`, 5, 5)) return core.sendJson(res, token.includes('/') ? 404 : 429, { error: token.includes('/') ? 'demo link not found' : 'too many demo starts, try again shortly', code: token.includes('/') ? 'not_found' : 'demo_rate' });
+        return apiPublicDemoSession(req, res, token);
+      }
 
       // Authed POST routes (tenant scoped through requireAuth).
       if (route === '/api/agents') return core.requireAuth(req, res, apiAgentsCreate, body);
@@ -1061,6 +1209,8 @@ const server = http.createServer(async (req, res) => {
       if (route === '/api/chat') return core.requireAuth(req, res, apiChat, body);
       if (route === '/api/stt') return core.requireAuth(req, res, apiStt, body);
       if (route === '/api/voice/session') return core.requireAuth(req, res, apiVoiceSession, body);
+      if (route === '/api/demo-links') return core.requireRole(req, res, 'owner', apiDemoLinksCreate, body);
+      if (route === '/api/demo-links/revoke') return core.requireRole(req, res, 'owner', apiDemoLinksRevoke, body);
       if (route === '/api/telephony/dial') return core.requireAuth(req, res, apiTelephonyDial, body);
       if (route === '/api/payment-intents') return core.requireAuth(req, res, apiPaymentIntentCreate, body);
       if (route === '/api/support/tickets') return core.requireAuth(req, res, apiSupportCreate, body);
@@ -1081,6 +1231,9 @@ const server = http.createServer(async (req, res) => {
       return core.sendJson(res, 404, { error: 'no such endpoint', code: 'not_found' });
     }
 
+    if (req.method === 'GET' && route.startsWith('/demo/')) {
+      req.url = '/demo.html';
+    }
     // Everything else is a static file from public/.
     core.serveStatic(req, res);
   } catch (e) {

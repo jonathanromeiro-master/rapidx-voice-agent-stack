@@ -31,3 +31,9 @@ Required states:
 ## Responsive behavior
 
 The animated voice stage remains the dominant surface. At tablet/mobile widths, the session controls wrap into one clear full-width action.
+
+## Demo link surfaces
+
+The authenticated Demo links section uses the same ivory cards, gold primary action, text-safe status pills and 44 px controls as the rest of Studio. A link creation form must name the selected agent and expose only server-owned expiry, duration and start-count limits. The secret URL is presented once and retained only in the current browser session because the server stores a SHA-256 hash, never a recoverable token.
+
+The public demo page is tenant branded but intentionally isolated from account navigation, billing, provider configuration and admin data. Its states are `loading`, `idle`, `connecting`, `listening`, `thinking`, `speaking`, `ended` and `error`. Text accompanies every state, the visitor can always end an active call, expiry and revocation fail closed, and mobile keeps one full-width primary action. Public copy stays provider and model neutral because tenants may change their runtime configuration.
