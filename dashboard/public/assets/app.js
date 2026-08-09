@@ -2313,7 +2313,7 @@ function adjustWallet(t) {
    7. SETTINGS
    =========================================================================== */
 async function viewSettings(root) {
-  root.appendChild(viewHead('Settings', 'Active and ready-to-wire providers, plus your tenant identity. Swap any layer without touching the rest.'));
+  root.appendChild(viewHead('Settings', 'Implemented providers, selected server defaults, and your tenant identity. Live call workflows are configured separately.'));
 
   const provHost = el('div', { id: 'provHost' }, skeleton('sk-card', 3));
   root.appendChild(provHost);
@@ -2426,19 +2426,24 @@ function paintProviders(host, reg) {
 }
 function provCard(p) {
   const live = !!p.live;
+  const selected = !!p.selected;
   const needs = p.needs || [];
   return el('div', { class: 'card prov-card' }, [
     el('div', { class: 'pc-top' }, [
       el('div', { class: 'pc-name' }, p.label || p.id),
-      live
-        ? el('span', { class: 'badge-live' }, [el('span', { class: 'd' }), 'Live'])
-        : el('span', { class: 'badge-ready' }, [el('span', { class: 'd' }), 'Ready'])
+      selected && live
+        ? el('span', { class: 'badge-live' }, [el('span', { class: 'd' }), 'Selected'])
+        : live
+          ? el('span', { class: 'badge-ready' }, [el('span', { class: 'd' }), 'Configured'])
+          : el('span', { class: 'badge-ready' }, [el('span', { class: 'd' }), 'Needs setup'])
     ]),
-    live
-      ? el('div', { class: 'pc-needs' }, 'Active and serving requests.')
+    selected && live
+      ? el('div', { class: 'pc-needs' }, 'Default provider for dashboard-owned requests.')
+      : live
+        ? el('div', { class: 'pc-needs' }, 'Credentials available. Select it through trusted server configuration.')
       : el('div', { class: 'pc-needs' }, needs.length
           ? ['To enable, add ', ...needs.flatMap((n, i) => i ? [document.createTextNode(', '), el('code', {}, n)] : [el('code', {}, n)]), document.createTextNode(' to your .env.')]
-          : 'Ready to wire.')
+          : 'Adapter is implemented but not configured.')
   ]);
 }
 
