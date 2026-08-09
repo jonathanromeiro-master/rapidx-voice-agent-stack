@@ -95,7 +95,8 @@
 - [x] Public page releases media tracks, WebSocket, peer connection and timers on end or page exit.
 - [x] Studio and public demo surfaces adapt at 375, 768 and 1280 px widths.
 - [ ] Enforce the server-selected maximum duration inside the upstream Dograh workflow, in addition to browser cleanup.
-- [ ] Complete a real visitor microphone, greeting, interruption and reply test against production after deployment.
+- [x] Production run 31 completed a real visitor WebRTC session with relay ICE, remote audio playback, agent speech, Groq response cycles, transcript generation, and clean resource release. The short-lived demo link was then revoked.
+- [ ] Explicitly drive and verify a barge-in interruption on the public demo page with a spoken test phrase.
 
 ## QA and production proof
 
