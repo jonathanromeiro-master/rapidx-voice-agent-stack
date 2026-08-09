@@ -32,9 +32,11 @@ Two files are copied out of the running image, patched, and copied back in:
 | `/app/api/services/configuration/registry.py` | Register a `rumik` entry in the TTS provider registry: id, label, models (`mulberry`, `muga`), voices, and the tunable fields (temperature, top_p, top_k, description, full_response_aggregation) |
 | `/app/api/services/pipecat/service_factory.py` | Construct a `RumikTTSService` from `pipecat_rumik` when `provider == "rumik"`, passing api_key, model, voice, description and the sampling params through |
 
-Always extract these from the image you are actually running rather than
-committing a copy. They track the Dograh version and a stale copy will silently
-revert unrelated behaviour.
+The repository includes the verified patched files in `rumik-overlay-local/`
+for the pinned reference deployment, with Dograh's BSD 2-Clause license. When
+upgrading Dograh, extract the same files from the new image, reapply the Rumik
+changes, and review the diff. Reusing a stale copy can silently revert unrelated
+upstream behaviour.
 
 ## Stacking overlays
 

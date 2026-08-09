@@ -1,19 +1,20 @@
 /**
- * RapidX Voice. Provider-agnostic engine. ZERO npm dependencies.
+ * RapidX Voice. Provider-agnostic engine.
  *
- * Three registries, each a uniform set of adapters:
+ * Four registries, each a uniform set of adapters:
+ *   stt        : deepgram (LIVE)
  *   tts        : rumik (LIVE) + elevenlabs, sarvam (stubs)
- *   llm        : gemini (LIVE) + claude (stub)   NEVER OpenAI/GPT
- *   telephony  : voicelink (LIVE) + zoom, twilio (stubs)
+ *   llm        : groq (LIVE) + gemini, claude
+ *   telephony  : vobiz via Dograh (LIVE) + zoom, twilio (stubs)
  *
  * Every adapter declares { id, label, live, needs:[envKeys], ... }. The `live`
  * flag is DERIVED from whether all required env keys are present at call time,
  * so the same code path lights up the moment a tenant adds the keys. Stubs
  * return a clear "not configured, add <ENV>" error instead of pretending.
  *
- * The LIVE adapters reuse the verified calls from _legacy/server.legacy.js
- * EXACTLY (Rumik browser UA never removed, Gemini thinkingBudget 0, VoiceLink
- * national number + country_code 91, token cached 30 min). Do not reinvent them.
+ * Deepgram handles streaming and batch transcription, Rumik keeps the verified
+ * browser UA, Groq handles the primary reasoning path, and
+ * outbound VoBiz calls always go through Dograh. Never call the raw VoBiz API.
  *
  * No em dashes anywhere. Commas and periods only.
  */
@@ -26,6 +27,8 @@ const BROWSER_UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/
 
 const RUMIK_HOST = 'silk-api.rumik.ai';
 const GEMINI_HOST = 'generativelanguage.googleapis.com';
+const DEEPGRAM_HOST = 'api.deepgram.com';
+const GROQ_HOST = 'api.groq.com';
 const MAX_TEXT = 2000; // Rumik hard cap
 
 const TTS_MODELS = new Set(['muga', 'mulberry']);
@@ -160,6 +163,106 @@ const ttsSarvam = {
 
 const DEFAULT_SYSTEM = 'You are RapidX, a warm, concise voice assistant. Reply in 1 to 3 short spoken sentences. No markdown, no lists, no emojis. This will be read aloud.';
 
+const sttDeepgram = {
+  id: 'deepgram',
+  label: 'Deepgram Nova-3',
+  layer: 'stt',
+  needs: ['DEEPGRAM_API_KEY'],
+  get live() { return hasEnv(this.needs); },
+  get model() { return process.env.DEEPGRAM_MODEL || 'nova-3'; },
+
+  async mintToken() {
+    const key = process.env.DEEPGRAM_API_KEY;
+    if (!key) throw notConfigured(this.label, this.needs);
+    const body = Buffer.from(JSON.stringify({ ttl_seconds: 60 }));
+    const up = await httpsPost(DEEPGRAM_HOST, '/v1/auth/grant', {
+      'Authorization': `Token ${key}`,
+      'Content-Type': 'application/json',
+      'Content-Length': body.length,
+    }, body);
+    let data = {}; try { data = JSON.parse(up.buffer.toString('utf8')); } catch {}
+    if (up.status !== 200 || !data.access_token) {
+      throw new ProviderError('deepgram token grant failed', up.status, 'upstream',
+        (data.err_msg || data.error || up.buffer.toString('utf8')).slice(0, 300));
+    }
+    return { access_token: data.access_token, expires_in: data.expires_in || 60, model: this.model };
+  },
+
+  async transcribe(opts) {
+    const key = process.env.DEEPGRAM_API_KEY;
+    if (!key) throw notConfigured(this.label, this.needs);
+    const audio = Buffer.from(String(opts.audio || ''), 'base64');
+    if (audio.length < 200) throw new ProviderError('no audio', 422, 'no_audio');
+    const mime = String(opts.mime || 'audio/webm').split(';')[0];
+    const started = Date.now();
+    const path = `/v1/listen?model=${encodeURIComponent(this.model)}&language=multi&smart_format=true&punctuate=true&utterances=false`;
+    const up = await httpsPost(DEEPGRAM_HOST, path, {
+      'Authorization': `Token ${key}`,
+      'Content-Type': mime,
+      'Content-Length': audio.length,
+    }, audio);
+    let data = {}; try { data = JSON.parse(up.buffer.toString('utf8')); } catch {}
+    if (up.status !== 200) {
+      throw new ProviderError('deepgram transcription failed', up.status, 'upstream',
+        (data.err_msg || data.error || up.buffer.toString('utf8')).slice(0, 300));
+    }
+    const alt = (((data.results || {}).channels || [])[0] || {}).alternatives || [];
+    return {
+      text: String((alt[0] || {}).transcript || '').trim(),
+      provider: 'deepgram',
+      model: this.model,
+      latency_ms: Date.now() - started,
+    };
+  },
+};
+
+const llmGroq = {
+  id: 'groq',
+  label: 'Groq Llama 3.3 70B',
+  layer: 'llm',
+  needs: ['GROQ_API_KEY'],
+  get live() { return hasEnv(this.needs); },
+  get model() { return process.env.GROQ_MODEL || 'llama-3.3-70b-versatile'; },
+
+  async chat(opts) {
+    const key = process.env.GROQ_API_KEY;
+    if (!key) throw notConfigured(this.label, this.needs);
+    const history = Array.isArray(opts.messages) ? opts.messages.slice(-16) : [];
+    const messages = [{ role: 'system', content: String(opts.system || DEFAULT_SYSTEM).slice(0, 3000) }]
+      .concat(history.filter((m) => m && m.text).map((m) => ({
+        role: (m.role === 'assistant' || m.role === 'model') ? 'assistant' : 'user',
+        content: String(m.text).slice(0, 4000),
+      })));
+    if (messages.length < 2) throw new ProviderError('no messages', 422, 'no_messages');
+    const payload = Buffer.from(JSON.stringify({
+      model: this.model,
+      messages,
+      temperature: 0.7,
+      max_completion_tokens: 400,
+      stream: false,
+    }));
+    const started = Date.now();
+    const up = await httpsPost(GROQ_HOST, '/openai/v1/chat/completions', {
+      'Authorization': `Bearer ${key}`,
+      'Content-Type': 'application/json',
+      'Content-Length': payload.length,
+    }, payload);
+    let data = {}; try { data = JSON.parse(up.buffer.toString('utf8')); } catch {}
+    if (up.status !== 200) {
+      throw new ProviderError('groq response failed', up.status, 'upstream',
+        (((data.error || {}).message) || up.buffer.toString('utf8')).slice(0, 300));
+    }
+    const choice = (data.choices || [])[0] || {};
+    return {
+      text: String(((choice.message || {}).content) || '').trim() || 'Sorry, I did not catch that.',
+      finish: choice.finish_reason || null,
+      provider: 'groq',
+      model: this.model,
+      latency_ms: Date.now() - started,
+    };
+  },
+};
+
 const llmGemini = {
   id: 'gemini',
   label: 'Google Gemini',
@@ -194,12 +297,22 @@ const llmGemini = {
         thinkingConfig: { thinkingBudget: 0 },
       },
     };
-    const buf = Buffer.from(JSON.stringify(payload));
-    const up = await httpsPost(GEMINI_HOST,
+    let buf = Buffer.from(JSON.stringify(payload));
+    let up = await httpsPost(GEMINI_HOST,
       `/v1beta/models/${encodeURIComponent(this.model)}:generateContent?key=${key}`,
       { 'Content-Type': 'application/json', 'Content-Length': buf.length }, buf);
 
     let data; try { data = JSON.parse(up.buffer.toString('utf8')); } catch { data = {}; }
+    // Some Gemini aliases reject thinkingConfig even though the same models
+    // accept the rest of the request. Retry once without that optional field.
+    if (up.status === 400 && /invalid argument/i.test((data.error && data.error.message) || '')) {
+      delete payload.generationConfig.thinkingConfig;
+      buf = Buffer.from(JSON.stringify(payload));
+      up = await httpsPost(GEMINI_HOST,
+        `/v1beta/models/${encodeURIComponent(this.model)}:generateContent?key=${key}`,
+        { 'Content-Type': 'application/json', 'Content-Length': buf.length }, buf);
+      try { data = JSON.parse(up.buffer.toString('utf8')); } catch { data = {}; }
+    }
     if (up.status !== 200) {
       throw new ProviderError('gemini error', up.status, 'upstream',
         (data.error && data.error.message) || '');
@@ -228,12 +341,20 @@ const llmGemini = {
       }],
       generationConfig: { temperature: 0, maxOutputTokens: 300, thinkingConfig: { thinkingBudget: 0 } },
     };
-    const buf = Buffer.from(JSON.stringify(payload));
-    const up = await httpsPost(GEMINI_HOST,
+    let buf = Buffer.from(JSON.stringify(payload));
+    let up = await httpsPost(GEMINI_HOST,
       `/v1beta/models/${encodeURIComponent(this.model)}:generateContent?key=${key}`,
       { 'Content-Type': 'application/json', 'Content-Length': buf.length }, buf);
 
     let d = {}; try { d = JSON.parse(up.buffer.toString('utf8')); } catch {}
+    if (up.status === 400 && /invalid argument/i.test((d.error && d.error.message) || '')) {
+      delete payload.generationConfig.thinkingConfig;
+      buf = Buffer.from(JSON.stringify(payload));
+      up = await httpsPost(GEMINI_HOST,
+        `/v1beta/models/${encodeURIComponent(this.model)}:generateContent?key=${key}`,
+        { 'Content-Type': 'application/json', 'Content-Length': buf.length }, buf);
+      try { d = JSON.parse(up.buffer.toString('utf8')); } catch { d = {}; }
+    }
     if (up.status !== 200) {
       throw new ProviderError('stt failed', up.status, 'upstream',
         (d.error && d.error.message) || '');
@@ -255,106 +376,157 @@ const llmClaude = {
 };
 
 /* ==========================================================================
-   TELEPHONY LAYER. VoiceLink LIVE, Zoom + Twilio stubs.
+   TELEPHONY LAYER. VoBiz through Dograh LIVE, Zoom + Twilio stubs.
    ========================================================================== */
 
-const VL_BASE = process.env.VOICELINK_BASE || 'app.voicelink.co.in';
-const VL_DID = process.env.VOICELINK_DID || '919484956633';
-const ENGINE_TUNNEL = process.env.ENGINE_TUNNEL || '';
-
-// Token cache, 30 min, reused across requests (verified behavior).
-let _vlToken = { value: '', exp: 0 };
-
-// Probe an https host root for reachability. Used for engine tunnel health.
-function tunnelHealth(host) {
-  return new Promise((resolve) => {
-    if (!host) return resolve('not set');
-    const https = require('https');
-    const rq = https.request({ host, path: '/', method: 'GET', timeout: 8000 }, (rp) => {
-      resolve('reachable (' + rp.statusCode + ')');
-      rp.destroy();
-    });
-    rq.on('error', () => resolve('unreachable'));
-    rq.on('timeout', () => { rq.destroy(); resolve('unreachable'); });
-    rq.end();
-  });
+function dograhConnection() {
+  const raw = String(process.env.DOGRAH_BASE_URL || '').trim();
+  let parsed;
+  try { parsed = new URL(/^https?:\/\//i.test(raw) ? raw : `https://${raw}`); } catch {
+    throw new ProviderError('DOGRAH_BASE_URL is invalid', 503, 'not_configured');
+  }
+  if (parsed.protocol !== 'https:') {
+    throw new ProviderError('DOGRAH_BASE_URL must use HTTPS', 503, 'not_configured');
+  }
+  return {
+    host: parsed.host,
+    prefix: parsed.pathname === '/' ? '' : parsed.pathname.replace(/\/$/, ''),
+    dashboard: parsed.origin + '/',
+  };
 }
 
-const telVoicelink = {
-  id: 'voicelink',
-  label: 'VoiceLink',
+function positiveIntEnv(name) {
+  const value = Number(process.env[name]);
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    throw new ProviderError(`${name} must be a positive integer`, 503, 'not_configured');
+  }
+  return value;
+}
+
+function parseJsonResponse(up) {
+  try { return JSON.parse(up.buffer.toString('utf8') || '{}'); } catch { return {}; }
+}
+
+function upstreamMessage(data, fallback) {
+  if (!data || typeof data !== 'object') return fallback;
+  if (typeof data.detail === 'string') return data.detail;
+  if (typeof data.message === 'string') return data.message;
+  if (typeof data.error === 'string') return data.error;
+  return fallback;
+}
+
+function upstreamStatus(status) {
+  // An invalid Dograh service credential is not an expired RapidX user session.
+  // Never forward 401/403, because the browser correctly treats those as a
+  // reason to sign the current RapidX user out.
+  if (status === 401 || status === 403) return 502;
+  return status || 502;
+}
+
+const telVobiz = {
+  id: 'vobiz',
+  label: 'VoBiz via Dograh',
   layer: 'telephony',
-  needs: ['VOICELINK_RESELLER_USER', 'VOICELINK_RESELLER_PASS'],
+  needs: [
+    'DOGRAH_BASE_URL', 'DOGRAH_API_KEY', 'DOGRAH_WORKFLOW_ID',
+    'DOGRAH_TELEPHONY_CONFIG_ID', 'DOGRAH_PHONE_NUMBER_ID',
+  ],
   get live() { return hasEnv(this.needs); },
-  get did() { return VL_DID; },
-  get dashboard() { return `https://${VL_BASE}/call-logs`; },
+  get did() { return String(process.env.VOBIZ_NUMBER || '').replace(/[^0-9+]/g, ''); },
+  get dashboard() { return dograhConnection().dashboard; },
 
-  // Login, cache the access_token 30 min. Reuses the verified auth call.
-  async login() {
-    if (_vlToken.value && Date.now() < _vlToken.exp) return _vlToken.value;
+  async request(method, pathname, payload) {
     if (!hasEnv(this.needs)) throw notConfigured(this.label, this.needs);
-    const buf = Buffer.from(JSON.stringify({
-      username: process.env.VOICELINK_RESELLER_USER,
-      password: process.env.VOICELINK_RESELLER_PASS,
-    }));
-    const up = await httpsPost(VL_BASE, '/api/v1/auth/login', {
-      'Content-Type': 'application/json',
-      'Content-Length': buf.length,
-      'User-Agent': BROWSER_UA,
-    }, buf);
-    let d = {}; try { d = JSON.parse(up.buffer.toString('utf8')); } catch {}
-    const tok = d && d.data && d.data.access_token;
-    if (!tok) throw new ProviderError('voicelink login failed', 502, 'upstream',
-      up.buffer.toString('utf8').slice(0, 200));
-    _vlToken = { value: tok, exp: Date.now() + 30 * 60 * 1000 };
-    return tok;
+    const connection = dograhConnection();
+    const headers = { 'X-API-Key': process.env.DOGRAH_API_KEY };
+    let up;
+    if (method === 'POST') {
+      const buf = Buffer.from(JSON.stringify(payload || {}));
+      headers['Content-Type'] = 'application/json';
+      headers['Content-Length'] = buf.length;
+      up = await httpsPost(connection.host, connection.prefix + pathname, headers, buf);
+    } else {
+      up = await httpsGet(connection.host, connection.prefix + pathname, headers);
+    }
+    return { up, data: parseJsonResponse(up) };
   },
 
-  // Live status: routing list + reseller clients (wallet + dids) + engine probe.
-  // Reuses the verified call-routing/list and reseller/clients reads.
+  // Report the VoBiz configuration and numbers as Dograh sees them. Reading
+  // status through Dograh verifies the same control plane used for live calls.
   async status() {
-    if (!hasEnv(this.needs)) throw notConfigured(this.label, this.needs);
-    const tok = await this.login();
-    const auth = { 'Authorization': `Bearer ${tok}`, 'User-Agent': BROWSER_UA };
-    const [cr, cl] = await Promise.all([
-      httpsGet(VL_BASE, '/api/v1/call-routing/list', auth),
-      httpsGet(VL_BASE, '/api/v1/reseller/clients', auth),
-    ]);
-    let routing = []; let wallet = null; let dids = [];
-    try { routing = (JSON.parse(cr.buffer.toString('utf8')).data) || []; } catch {}
-    try {
-      const c = (JSON.parse(cl.buffer.toString('utf8')).data || [])[0] || {};
-      wallet = c.wallet;
-      dids = c.dids || [];
-    } catch {}
-    const engine = await tunnelHealth(ENGINE_TUNNEL);
-    return { routing, wallet, dids, engine, did: VL_DID, dashboard: this.dashboard };
+    const configId = positiveIntEnv('DOGRAH_TELEPHONY_CONFIG_ID');
+    const phoneNumberId = positiveIntEnv('DOGRAH_PHONE_NUMBER_ID');
+    const configsResult = await this.request('GET', '/api/v1/organizations/telephony-configs');
+    if (configsResult.up.status < 200 || configsResult.up.status >= 300) {
+      throw new ProviderError('Could not read VoBiz status from Dograh', upstreamStatus(configsResult.up.status),
+        'upstream', upstreamMessage(configsResult.data, 'Dograh telephony status failed.'));
+    }
+    const configs = Array.isArray(configsResult.data.configurations)
+      ? configsResult.data.configurations : [];
+    const config = configs.find((row) => Number(row.id) === configId);
+    if (!config || String(config.provider || '').toLowerCase() !== 'vobiz') {
+      throw new ProviderError('VoBiz is not configured in Dograh', 503, 'not_configured',
+        `Expected Dograh telephony configuration ${configId} with provider vobiz.`);
+    }
+
+    const numbersResult = await this.request('GET',
+      `/api/v1/organizations/telephony-configs/${configId}/phone-numbers`);
+    if (numbersResult.up.status < 200 || numbersResult.up.status >= 300) {
+      throw new ProviderError('Could not read VoBiz numbers from Dograh', upstreamStatus(numbersResult.up.status),
+        'upstream', upstreamMessage(numbersResult.data, 'Dograh phone-number status failed.'));
+    }
+    const numbers = Array.isArray(numbersResult.data.phone_numbers)
+      ? numbersResult.data.phone_numbers : [];
+    const selectedNumber = numbers.find((row) => Number(row.id) === phoneNumberId);
+    if (!selectedNumber || selectedNumber.is_active === false) {
+      throw new ProviderError('The VoBiz caller ID is not active in Dograh', 503, 'not_configured',
+        `Expected active Dograh phone number ${phoneNumberId}.`);
+    }
+    const dids = numbers.map((row) => ({
+      id: row.id,
+      number: row.address || row.address_normalized,
+      status: row.is_active === false ? 'inactive' : 'active',
+      label: row.label || '',
+      isDefaultCallerId: !!row.is_default_caller_id,
+      inboundWorkflowId: row.inbound_workflow_id,
+      inboundWorkflowName: row.inbound_workflow_name || '',
+    }));
+    return {
+      connected: true,
+      provider: 'vobiz',
+      orchestrator: 'dograh',
+      configuration: {
+        id: config.id,
+        name: config.name,
+        isDefaultOutbound: !!config.is_default_outbound,
+      },
+      dids,
+      did: selectedNumber.address || selectedNumber.address_normalized || this.did,
+      workflowId: positiveIntEnv('DOGRAH_WORKFLOW_ID'),
+      dashboard: this.dashboard,
+    };
   },
 
-  // Place a REAL paid call via add_lead. The route layer enforces confirm:true.
-  // Number is normalized to a 10-digit national number. country_code is '91'
-  // (NOT a full E.164), which is the verified contract that avoids cause 38.
-  async dial(rawNumber) {
+  // Place one real paid call through Dograh. The HTTP route above this adapter
+  // is the sole confirm guard, and this method makes exactly one initiate call.
+  async dial(rawNumber, options = {}) {
     if (!hasEnv(this.needs)) throw notConfigured(this.label, this.needs);
     let num = String(rawNumber || '').replace(/[^0-9]/g, '');
     if (num.length === 12 && num.startsWith('91')) num = num.slice(2);
     if (num.length !== 10) {
       throw new ProviderError('need a 10-digit Indian mobile (national format)', 422, 'bad_number');
     }
-    const tok = await this.login();
-    const buf = Buffer.from(JSON.stringify({
-      did_number: VL_DID,
-      customer_number: num,
-      country_code: '91',
-    }));
-    const up = await httpsPost(VL_BASE, '/api/v1/add_lead', {
-      'Authorization': `Bearer ${tok}`,
-      'Content-Type': 'application/json',
-      'Content-Length': buf.length,
-      'User-Agent': BROWSER_UA,
-    }, buf);
-    let d = {}; try { d = JSON.parse(up.buffer.toString('utf8') || '{}'); } catch {}
-    return { status: up.status, data: d };
+    const result = await this.request('POST', '/api/v1/telephony/initiate-call', {
+      workflow_id: Number.isInteger(options.workflowId) && options.workflowId > 0 ? options.workflowId : positiveIntEnv('DOGRAH_WORKFLOW_ID'),
+      telephony_configuration_id: positiveIntEnv('DOGRAH_TELEPHONY_CONFIG_ID'),
+      from_phone_number_id: positiveIntEnv('DOGRAH_PHONE_NUMBER_ID'),
+      phone_number: '+91' + num,
+    });
+    if (result.up.status < 200 || result.up.status >= 300) {
+      throw new ProviderError('Dograh could not initiate the VoBiz call', upstreamStatus(result.up.status),
+        'upstream', upstreamMessage(result.data, 'The call was not placed.'));
+    }
+    return { status: result.up.status, data: result.data };
   },
 };
 
@@ -383,9 +555,10 @@ const telTwilio = {
    ========================================================================== */
 
 const registries = {
+  stt: { deepgram: sttDeepgram },
   tts: { rumik: ttsRumik, elevenlabs: ttsElevenlabs, sarvam: ttsSarvam },
-  llm: { gemini: llmGemini, claude: llmClaude },
-  telephony: { voicelink: telVoicelink, zoom: telZoom, twilio: telTwilio },
+  llm: { groq: llmGroq, gemini: llmGemini, claude: llmClaude },
+  telephony: { vobiz: telVobiz, zoom: telZoom, twilio: telTwilio },
 };
 
 // Resolve an adapter for a layer, falling back to that layer's live default.
@@ -399,8 +572,9 @@ function get(layer, id) {
 
 // Convenience accessors for the live defaults.
 const tts = ttsRumik;
-const llm = llmGemini;
-const telephony = telVoicelink;
+const stt = sttDeepgram;
+const llm = llmGroq;
+const telephony = telVobiz;
 
 // Shape used by GET /api/providers so the UI can render active vs ready-to-wire.
 function describeProviders() {
@@ -419,7 +593,7 @@ function describeProviders() {
 module.exports = {
   ProviderError,
   registries, get, describeProviders,
-  tts, llm, telephony,
+  stt, tts, llm, telephony,
   MAX_TEXT, TTS_MODELS, TTS_SPEAKERS,
   BROWSER_UA,
 };

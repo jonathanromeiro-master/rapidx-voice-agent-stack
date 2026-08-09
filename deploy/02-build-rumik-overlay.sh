@@ -9,26 +9,18 @@ BASE_IMG=$(rsh "docker ps --format '{{.Image}}' | grep -i dograh-api | head -1")
 ok "Base image: $BASE_IMG"
 
 rsh "mkdir -p /opt/rumik-overlay"
-sed "s|^FROM .*|FROM $BASE_IMG|" "$ROOT/deploy/rumik-overlay/Dockerfile" \
+OVERLAY="$ROOT/rumik-overlay-local"
+[ -f "$OVERLAY/registry.py" ] || die "Missing $OVERLAY/registry.py"
+[ -f "$OVERLAY/service_factory.py" ] || die "Missing $OVERLAY/service_factory.py"
+[ -f "$OVERLAY/check_validity.py" ] || die "Missing $OVERLAY/check_validity.py"
+
+sed "s|^FROM .*|FROM $BASE_IMG|" "$OVERLAY/Dockerfile" \
   | rsh "cat > /opt/rumik-overlay/Dockerfile"
 
-# The registry patches must come from the running image so they match its version.
-say "Extracting registry files from the running image to patch"
-CID=$(api_container)
-rsh "docker cp $CID:/app/api/services/configuration/registry.py /opt/rumik-overlay/registry.py"
-rsh "docker cp $CID:/app/api/services/pipecat/service_factory.py /opt/rumik-overlay/service_factory.py"
-
-cat <<'WARN'
-
-  NOTE: registry.py and service_factory.py have been copied out of the running
-  image UNPATCHED. Rumik must be registered in both before the image is built:
-    - registry.py        add a rumik entry to the TTS provider registry
-    - service_factory.py construct a RumikTTSService when provider == "rumik"
-  Reference patches are documented in docs/RUMIK-OVERLAY.md.
-
-WARN
-
-read -r -p "Patched both files on the box? Press enter to build, Ctrl-C to stop. " _
+say "Uploading the verified Rumik registry and service patches"
+for file in registry.py service_factory.py check_validity.py; do
+  rsh "cat > /opt/rumik-overlay/$file" < "$OVERLAY/$file"
+done
 
 say "Building (pip install uses --no-deps, see docs/RUMIK-OVERLAY.md for why)"
 rsh "cd /opt/rumik-overlay && docker build -t local/dograh-api:rumik-v1 ."
@@ -38,4 +30,9 @@ rsh "cd /opt/dograh-hq/dograh && printf 'services:\n  api:\n    image: local/dog
 
 sleep 20
 rsh "docker ps --format '{{.Names}}\t{{.Status}}' | grep api"
+
+say "Verifying Rumik is registered"
+TOK=$(dograh_token)
+api GET /api/v1/organizations/model-configurations/v2/defaults \
+  | python3 -c 'import json,sys; d=json.load(sys.stdin); assert "rumik" in str(d).lower(); print("rumik_registered=true")'
 ok "Rumik overlay live. Next: bash deploy/03-configure.sh"

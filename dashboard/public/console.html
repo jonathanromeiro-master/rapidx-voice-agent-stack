@@ -84,7 +84,7 @@
         </div>
 
         <div style="border-top:1px solid var(--line);margin-top:18px;padding-top:14px">
-          <label class="field-label">📞 Outbound call (real, costs ₹0.50/min)</label>
+          <label class="field-label">📞 Outbound call (real, paid VoBiz call)</label>
           <div class="dialer">
             <input id="dialNum" class="input" placeholder="10-digit mobile, e.g. 9876543210" />
             <button id="dialBtn" class="btn btn-primary">Call</button>
@@ -96,7 +96,7 @@
 
     <!-- COL 3: telephony status -->
     <section class="col-card">
-      <h3 style="font-size:14px;margin-bottom:12px">VoiceLink status</h3>
+      <h3 style="font-size:14px;margin-bottom:12px">VoBiz via Dograh</h3>
       <div id="vlStatus"><div class="mini">loading…</div></div>
       <div class="inbound-note" id="inboundNote" hidden></div>
       <a id="cdrLink" class="btn btn-ghost btn-sm" style="width:100%;margin-top:12px;text-decoration:none;text-align:center" href="#" target="_blank">Open call log ↗</a>
@@ -112,8 +112,11 @@ function ctx(){ if(!audioCtx) audioCtx=new (window.AudioContext||window.webkitAu
 
 fetch('/api/health').then(r=>r.json()).then(h=>{
   const el=$('#health');
-  el.textContent='rumik '+(h.rumik?'✓':'✗')+'  brain '+(h.gemini?'✓':'✗')+'  voicelink '+(h.voicelink?'✓':'✗');
-  el.className='pill '+((h.rumik&&h.gemini&&h.voicelink)?'ok':'err');
+  const rumik=!!(h.providers&&h.providers.tts&&h.providers.tts.rumik);
+  const gemini=!!(h.providers&&h.providers.llm&&h.providers.llm.gemini);
+  const vobiz=!!(h.providers&&h.providers.telephony&&h.providers.telephony.vobiz);
+  el.textContent='rumik '+(rumik?'✓':'✗')+'  brain '+(gemini?'✓':'✗')+'  vobiz '+(vobiz?'✓':'✗');
+  el.className='pill '+((rumik&&gemini&&vobiz)?'ok':'err');
 }).catch(()=>{});
 
 // ---- Rumik streaming voice ----
@@ -180,31 +183,29 @@ $('#sendBtn').onclick=send; $('#chatInput').addEventListener('keydown',e=>{ if(e
 $('#dialBtn').onclick=async()=>{
   if(!selected){ $('#dialStatus').textContent='pick an agent first'; return; }
   const num=$('#dialNum').value.trim(); if(!num){ $('#dialStatus').textContent='enter a number'; return; }
-  if(!confirm('Place a REAL call to '+num+'? This dials a live phone and costs ₹0.50/min.')) return;
+  if(!confirm('Place a REAL paid VoBiz call to '+num+' through Dograh?')) return;
   $('#dialStatus').textContent='dialing…';
-  const r=await fetch('/api/voicelink/dial',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({number:num,confirm:true})});
+  const r=await fetch('/api/telephony/dial',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({number:num,confirm:true})});
   const d=await r.json();
   $('#dialStatus').textContent = r.ok ? ('call queued ✓ '+(d.message||JSON.stringify(d).slice(0,80))) : ('error: '+(d.error||d.message||r.status));
 };
 
-// ---- VoiceLink status ----
-fetch('/api/voicelink/status').then(r=>r.json()).then(s=>{
+// ---- VoBiz status from Dograh ----
+fetch('/api/telephony/status').then(r=>r.json()).then(s=>{
   const box=$('#vlStatus');
   if(s.error){ box.innerHTML='<div class="mini" style="color:var(--bad)">'+s.error+'</div>'; return; }
-  const eng = s.engine && s.engine.startsWith('reachable');
   let html='';
-  html+='<div class="status-line"><span>Wallet</span><b>₹'+((s.wallet&&s.wallet.balance)||'?')+'</b></div>';
-  html+='<div class="status-line"><span>Engine tunnel</span><span class="badge '+(eng?'ok':'bad')+'">'+(s.engine||'?')+'</span></div>';
-  (s.routing||[]).forEach(r=>{
-    const active=r.status===1;
-    html+='<div class="status-line"><span>DID '+r.did_number+'</span><span class="badge '+(active?'ok':'bad')+'">bot '+r.inbound_websocket_bot_id+' '+(active?'active':'off')+'</span></div>';
+  html+='<div class="status-line"><span>Provider</span><span class="badge '+(s.connected?'ok':'bad')+'">VoBiz via Dograh</span></div>';
+  html+='<div class="status-line"><span>Configuration</span><b>'+((s.configuration&&s.configuration.name)||'?')+'</b></div>';
+  (s.dids||[]).forEach(r=>{
+    const active=r.status==='active';
+    html+='<div class="status-line"><span>Number '+(r.number||'?')+'</span><span class="badge '+(active?'ok':'bad')+'">'+(active?'active':'off')+'</span></div>';
   });
-  html+='<div class="status-line"><span>Outbound</span><span class="badge ok">working</span></div>';
-  html+='<div class="status-line"><span>Inbound (carrier)</span><span class="badge warn">blocked</span></div>';
+  html+='<div class="status-line"><span>Outbound workflow</span><span class="badge ok">'+(s.workflowId||'?')+'</span></div>';
   box.innerHTML=html;
   $('#cdrLink').href=s.dashboard||'#';
   $('#inboundNote').hidden=false;
-  $('#inboundNote').innerHTML='<b>Inbound blocker:</b> your side is live (engine + routing OK), but VoiceLink has not enabled incoming on the Mobile DID '+s.did+', and the account has 1 channel. Ask VoiceLink to enable incoming on '+s.did+' and add a 2nd channel. Outbound + browser agents work now.';
+  $('#inboundNote').innerHTML='<b>Routing:</b> Dograh initiates outbound calls through VoBiz. Inbound calls follow the workflow assigned to each active number.';
 }).catch(e=>{ $('#vlStatus').innerHTML='<div class="mini" style="color:var(--bad)">status failed</div>'; });
 
 loadAgents();

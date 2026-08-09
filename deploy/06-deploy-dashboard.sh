@@ -10,9 +10,17 @@ rsync -a -e "ssh -o StrictHostKeyChecking=no -i $SSH_KEY" \
   "$ROOT/dashboard/" "root@$VPS_IP:/opt/rapidx-voice/"
 
 # Keys stay server-side, they never reach the browser.
+export DOGRAH_BASE_URL="${DOGRAH_BASE_URL:-$BASE}"
+export DOGRAH_WORKFLOW_ID="${DOGRAH_WORKFLOW_ID:-${WORKFLOW_ID:-}}"
+export DOGRAH_TELEPHONY_CONFIG_ID="${DOGRAH_TELEPHONY_CONFIG_ID:-${TELEPHONY_CONFIG_ID:-}}"
+export DOGRAH_PHONE_NUMBER_ID="${DOGRAH_PHONE_NUMBER_ID:-${PHONE_NUMBER_ID:-}}"
 python3 - <<PY | rsh "cat > /opt/rapidx-voice/.env"
 import os
-for k in ["RUMIK_API_KEY","GEMINI_API_KEY","GEMINI_MODEL"]:
+for k in [
+    "RUMIK_API_KEY", "GEMINI_API_KEY", "GEMINI_MODEL",
+    "DOGRAH_BASE_URL", "DOGRAH_API_KEY", "DOGRAH_WORKFLOW_ID",
+    "DOGRAH_TELEPHONY_CONFIG_ID", "DOGRAH_PHONE_NUMBER_ID", "VOBIZ_NUMBER",
+]:
     v=os.environ.get(k,"")
     if v: print(f"{k}={v}")
 print(f"PORT={os.environ.get('DASHBOARD_PORT','8787')}")

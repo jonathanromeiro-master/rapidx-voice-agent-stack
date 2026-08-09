@@ -156,18 +156,45 @@ function htmlEscape(s) {
    ========================================================================== */
 
 const DATA_DIR = path.join(ROOT, 'data');
-const DB_FILE = path.join(DATA_DIR, 'db.json');
-const DB_TMP = path.join(DATA_DIR, 'db.json.tmp');
+const DB_FILE = process.env.RAPIDX_DB_FILE ? path.resolve(process.env.RAPIDX_DB_FILE) : path.join(DATA_DIR, 'db.json');
+const DB_TMP = `${DB_FILE}.tmp`;
 
 function defaultDb() {
-  return { tenants: [], users: [], agents: [], usage: [], sessions: [] };
+  return {
+    schemaVersion: 2,
+    tenants: [], users: [], agents: [], usage: [], sessions: [],
+    wallets: [], ledger: [], paymentIntents: [], supportTickets: [],
+    supportMessages: [], auditEvents: [], presets: [], byonConnections: [],
+    hvacJobs: [], hvacSettings: [], paymentEvents: [],
+  };
+}
+
+const COLLECTIONS = [
+  'tenants', 'users', 'agents', 'usage', 'sessions', 'wallets', 'ledger',
+  'paymentIntents', 'supportTickets', 'supportMessages', 'auditEvents',
+  'presets', 'byonConnections', 'hvacJobs', 'hvacSettings', 'paymentEvents',
+];
+
+function migrateDb(parsed) {
+  const out = Object.assign(defaultDb(), parsed || {});
+  for (const k of COLLECTIONS) if (!Array.isArray(out[k])) out[k] = [];
+  out.schemaVersion = 2;
+  for (const tenant of out.tenants) {
+    if (!tenant.status) tenant.status = 'active';
+    if (!tenant.privacyMode) tenant.privacyMode = 'standard';
+  }
+  for (const user of out.users) {
+    if (!['super_admin', 'admin', 'owner', 'member'].includes(user.role)) user.role = 'member';
+    if (!user.status) user.status = 'active';
+  }
+  return out;
 }
 
 let _db = null;        // in-memory cache
 let _writeChain = Promise.resolve(); // serial queue tail
 
 function ensureDataDir() {
-  try { fs.mkdirSync(DATA_DIR, { recursive: true }); } catch (_) {}
+  try { fs.mkdirSync(path.dirname(DB_FILE), { recursive: true }); } catch (_) {}
 }
 
 // Load db.json into memory. On a missing or corrupt file, return a fresh default
@@ -179,10 +206,7 @@ function loadDb() {
     const raw = fs.readFileSync(DB_FILE, 'utf8');
     const parsed = JSON.parse(raw);
     // Defensive: guarantee every collection exists even if the file is partial.
-    _db = Object.assign(defaultDb(), parsed);
-    for (const k of ['tenants', 'users', 'agents', 'usage', 'sessions']) {
-      if (!Array.isArray(_db[k])) _db[k] = [];
-    }
+    _db = migrateDb(parsed);
   } catch (_) {
     _db = defaultDb();
   }
@@ -258,11 +282,25 @@ const COOKIE_NAME = 'rxv_sess';
 // Create a session row for a user, persist it, return the opaque token.
 async function createSession(userId, tenantId) {
   const token = crypto.randomBytes(32).toString('hex');
+  const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
   const exp = Date.now() + SESSION_TTL_MS;
   await mutate((d) => {
     // Prune any already-expired sessions while we are here (cheap housekeeping).
     d.sessions = d.sessions.filter((s) => s.exp > Date.now());
-    d.sessions.push({ token, userId, tenantId, exp });
+    d.sessions.push({ tokenHash, userId, tenantId, exp });
+  });
+  return token;
+}
+
+const IMPERSONATION_TTL_MS = 30 * 60 * 1000;
+
+async function createImpersonationSession(actorUserId, targetUserId, targetTenantId, reason) {
+  const token = crypto.randomBytes(32).toString('hex');
+  const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
+  const exp = Date.now() + IMPERSONATION_TTL_MS;
+  await mutate((d) => {
+    d.sessions = d.sessions.filter((s) => s.exp > Date.now());
+    d.sessions.push({ tokenHash, userId: targetUserId, tenantId: targetTenantId, exp, impersonatorUserId: actorUserId, impersonationReason: String(reason || '').slice(0, 240) });
   });
   return token;
 }
@@ -270,7 +308,8 @@ async function createSession(userId, tenantId) {
 // Build the Set-Cookie header value for a fresh session.
 function sessionCookie(token) {
   const maxAge = Math.floor(SESSION_TTL_MS / 1000);
-  return `${COOKIE_NAME}=${token}; HttpOnly; Path=/; Max-Age=${maxAge}; SameSite=Lax`;
+  const secure = process.env.NODE_ENV === 'production' ? '; Secure' : '';
+  return `${COOKIE_NAME}=${token}; HttpOnly; Path=/; Max-Age=${maxAge}; SameSite=Lax${secure}`;
 }
 
 // Build the Set-Cookie header value that clears the session.
@@ -300,24 +339,42 @@ async function getSession(req) {
   const token = parseCookieToken(req);
   if (!token || token.length < 16) return null;
   const d = db();
-  const session = d.sessions.find((s) => s.token === token);
+  const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
+  const session = d.sessions.find((s) => s.tokenHash === tokenHash || s.token === token);
   if (!session) return null;
   if (session.exp <= Date.now()) {
     // Expired: drop it so the next request is clean.
-    await mutate((dd) => { dd.sessions = dd.sessions.filter((s) => s.token !== token); });
+    await mutate((dd) => {
+      dd.sessions = dd.sessions.filter((s) => s.token !== token && s.tokenHash !== tokenHash);
+    });
     return null;
   }
   const user = d.users.find((u) => u.id === session.userId);
   const tenant = d.tenants.find((t) => t.id === session.tenantId);
-  if (!user || !tenant) return null;
-  return { session, user, tenant };
+  if (!user || !tenant || user.status !== 'active' || tenant.status !== 'active') return null;
+  const impersonator = session.impersonatorUserId ? d.users.find((u) => u.id === session.impersonatorUserId && u.status === 'active') : null;
+  if (session.impersonatorUserId && (!impersonator || impersonator.role !== 'super_admin')) return null;
+  return { session, user, tenant, impersonator };
 }
 
 // Remove a session by token (logout).
 async function destroySession(req) {
   const token = parseCookieToken(req);
   if (!token) return;
-  await mutate((d) => { d.sessions = d.sessions.filter((s) => s.token !== token); });
+  const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
+  await mutate((d) => { d.sessions = d.sessions.filter((s) => s.token !== token && s.tokenHash !== tokenHash); });
+}
+
+const ROLE_LEVEL = { member: 1, owner: 2, admin: 3, super_admin: 4 };
+function hasRole(user, minimum) {
+  return (ROLE_LEVEL[user && user.role] || 0) >= (ROLE_LEVEL[minimum] || 99);
+}
+
+async function requireRole(req, res, minimum, handler, body) {
+  return requireAuth(req, res, (r, s, ctx) => {
+    if (!hasRole(ctx.user, minimum)) return sendJson(s, 403, { error: 'insufficient role', code: 'forbidden' });
+    return handler(r, s, ctx);
+  }, body);
 }
 
 /**
@@ -410,9 +467,9 @@ module.exports = {
   loadEnv,
   send, sendJson, readBody, httpsPost, httpsGet,
   htmlEscape,
-  db, mutate, loadDb, defaultDb,
+  db, mutate, loadDb, defaultDb, migrateDb,
   hashPassword, verifyPassword,
-  createSession, destroySession, getSession, requireAuth,
+  createSession, createImpersonationSession, destroySession, getSession, requireAuth, requireRole, hasRole,
   sessionCookie, clearCookie, COOKIE_NAME,
   rateOk,
   serveStatic, MIME,

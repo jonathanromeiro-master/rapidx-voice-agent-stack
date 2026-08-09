@@ -45,6 +45,12 @@ provider in its registry.
   business instead.
 - **A management console.** Build agents, generate speech, talk to an agent in the
   browser, see usage and cost in INR.
+- **A reusable SaaS control plane.** Isolated tenants, roles, presets, wallets,
+  PayU checkout, support, privacy modes, BYON requests, audit history and admin tools.
+- **A direct browser voice call.** Dograh SmallWebRTC runs the same published
+  workflow used by the phone path, without rendering transcript text in the UI.
+- **An HVAC example.** Capture call outcomes, route dispatch work, export CSV,
+  and optionally book real Cal.com availability from a tenant-scoped desk.
 - **Run records.** Every call logs its transcript, recording, disposition and the
   exact provider pipeline it ran on.
 
@@ -76,10 +82,12 @@ docs/
   TROUBLESHOOTING.md        every real failure hit on this stack, with real fixes
   PRICING.md                measured per-minute cost and the defensible claim
 
-dashboard/                  RapidX Voice Studio, zero npm dependencies
+dashboard/                  RapidX Voice Studio, no build step and one dependency
 ```
 
 ---
+
+The dashboard has no build step and one pinned runtime dependency, `ws`.
 
 ## Requirements
 

@@ -74,17 +74,34 @@ PY
 )" >/dev/null
 ok "Pipeline set"
 
-# ---- d) The Ria workflow ----------------------------------------------------
-say "Creating the Ria receptionist workflow"
+# ---- d) The Rumik demo workflow --------------------------------------------
+say "Creating the Rumik ₹1 demo workflow"
 WF=$(api POST /api/v1/workflow/create/definition "$(python3 - <<PY
 import json
-d=json.load(open("$ROOT/workflows/ria-receptionist.json"))
-print(json.dumps({"name":"RapidX Demo Receptionist (Ria)","workflow_definition":d}))
+d=json.load(open("$ROOT/workflows/rumik-one-rupee-demo.json"))
+print(json.dumps({"name":"Rumik ₹1 Demo Agent","workflow_definition":d}))
 PY
 )")
 WF_ID=$(printf '%s' "$WF" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
-api POST "/api/v1/workflow/$WF_ID/publish" >/dev/null
-ok "Workflow id $WF_ID published"
+
+# Current Dograh releases activate definitions at creation time. Older releases
+# create a draft that still needs the publish endpoint.
+WF_STATUS=$(api GET "/api/v1/workflow/fetch/$WF_ID" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("status", ""))')
+if [ "$WF_STATUS" != "active" ]; then
+  api POST "/api/v1/workflow/$WF_ID/publish" >/dev/null
+fi
+ok "Workflow id $WF_ID active"
+
+# Bind inbound calls only after the workflow exists. This also makes Dograh
+# update the provider application's answer_url and synchronize the DID.
+say "Binding the Vobiz number to workflow $WF_ID for inbound calls"
+api PUT "/api/v1/organizations/telephony-configs/$CFG_ID/phone-numbers/$PN_ID" \
+  "$(python3 - <<PY
+import json
+print(json.dumps({"inbound_workflow_id": int("$WF_ID"), "is_active": True}))
+PY
+)" >/dev/null
+ok "Inbound workflow attached"
 
 # ---- verify -----------------------------------------------------------------
 say "Verifying"

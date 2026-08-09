@@ -23,7 +23,7 @@ dograh_token() {
       -H 'Content-Type: application/json' \
       -d '{\"email\":\"$DOGRAH_EMAIL\",\"password\":\"$DOGRAH_PASSWORD\"}'")
   local tok
-  tok=$(printf '%s' "$out" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("token",""))' 2>/dev/null || true)
+  tok=$(printf '%s' "$out" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("access_token") or d.get("token") or "")' 2>/dev/null || true)
   [ -n "$tok" ] || { echo "Login failed: $out" >&2; exit 1; }
   printf '%s' "$tok"
 }

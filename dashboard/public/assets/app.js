@@ -40,8 +40,11 @@ const State = {
   providers: null,
   usage: null,
   telephony: null,
+  wallet: null,
+  presets: [],
+  tickets: [],
   activeAgentId: null, // for Talk-to-it
-  loaded: { agents: false, providers: false, usage: false, telephony: false }
+  loaded: { agents: false, providers: false, usage: false, telephony: false, wallet: false, presets: false, tickets: false }
 };
 
 const VOICE_MODELS = ['mulberry', 'muga'];
@@ -58,6 +61,10 @@ const RATE = { mulberry: 0.50, muga: 0.99 };
 async function api(path, opts) {
   opts = opts || {};
   const init = { method: opts.method || 'GET', credentials: 'include', headers: {} };
+  const controller = new AbortController();
+  const timeoutMs = Number.isFinite(opts.timeoutMs) ? opts.timeoutMs : 35000;
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  init.signal = controller.signal;
   if (opts.body !== undefined) {
     init.headers['Content-Type'] = 'application/json';
     init.body = JSON.stringify(opts.body);
@@ -66,8 +73,11 @@ async function api(path, opts) {
   try {
     res = await fetch(path, init);
   } catch (e) {
+    clearTimeout(timeout);
+    if (e && e.name === 'AbortError') throw new ApiError(408, 'The agent took too long to respond. Please try again.');
     throw new ApiError(0, 'Network error. Is the server running.');
   }
+  clearTimeout(timeout);
   if (res.status === 401 && !opts.allow401) {
     State.me = null;
     if (!path.endsWith('/api/me')) renderAuth();
@@ -206,16 +216,13 @@ function renderAuth() {
         el('span', { class: 'nm' }, [document.createTextNode('RapidX '), el('em', {}, 'Voice')])
       ]),
       el('h1', {}, mode === 'login' ? 'Welcome back' : 'Start building'),
-      el('p', { class: 'sub' }, mode === 'login' ? 'Sign in to your voice agent console.' : 'Spin up a tenant and ship production voice agents at roughly one rupee.'),
+      el('p', { class: 'sub' }, mode === 'login' ? 'Sign in to your voice agent console.' : 'Spin up a tenant and ship AI voice agents from ₹1/min for the AI layer. Telephony is separate.'),
       form,
       el('div', { class: 'auth-toggle' }, [
         document.createTextNode(mode === 'login' ? 'New to RapidX Voice. ' : 'Already have an account. '),
         el('button', { type: 'button', onclick: () => { mode = mode === 'login' ? 'signup' : 'login'; draw(); } }, mode === 'login' ? 'Create one' : 'Sign in')
       ]),
-      mode === 'login' ? el('div', { class: 'auth-demo' }, [
-        document.createTextNode('Demo tenant: '),
-        el('code', {}, 'demo@rapidx.ai'), document.createTextNode(' / '), el('code', {}, 'rapidxvoice')
-      ]) : null
+      mode === 'login' ? el('div', { class: 'auth-demo' }, 'Use your workspace email and password. Test accounts are provisioned securely by the platform admin.') : null
     ]);
 
     root.innerHTML = '';
@@ -235,6 +242,7 @@ function renderAuth() {
     const email = ($('#f_email').value || '').trim();
     const password = $('#f_pass').value || '';
     if (!email || !password) { showErr('Email and password are required.'); return; }
+    if (mode === 'signup' && password.length < 12) { showErr('Use at least 12 characters for your password.'); return; }
     const btn = e.target.querySelector('button[type=submit]');
     btn.disabled = true; btn.textContent = mode === 'login' ? 'Signing in...' : 'Creating...';
     try {
@@ -264,7 +272,8 @@ function renderAuth() {
 }
 function resetData() {
   State.agents = []; State.providers = null; State.usage = null; State.telephony = null;
-  State.loaded = { agents: false, providers: false, usage: false, telephony: false };
+  State.wallet = null; State.presets = []; State.tickets = [];
+  State.loaded = { agents: false, providers: false, usage: false, telephony: false, wallet: false, presets: false, tickets: false };
   State.activeAgentId = null;
 }
 
@@ -274,9 +283,13 @@ function resetData() {
 const ROUTES = [
   { id: 'overview', label: 'Overview', icon: 'grid' },
   { id: 'agents', label: 'Agents', icon: 'users' },
+  { id: 'presets', label: 'Presets', icon: 'template' },
   { id: 'studio', label: 'Voice Studio', icon: 'wave' },
   { id: 'talk', label: 'Talk to it', icon: 'mic' },
   { id: 'telephony', label: 'Telephony', icon: 'phone' },
+  { id: 'billing', label: 'Billing', icon: 'wallet' },
+  { id: 'support', label: 'Support', icon: 'support' },
+  { id: 'admin', label: 'Admin', icon: 'shield', adminOnly: true },
   { id: 'settings', label: 'Settings', icon: 'gear' }
 ];
 
@@ -288,6 +301,10 @@ function navIcon(name) {
     mic: '<rect x="9" y="2.5" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0"/><path d="M12 17.5V21"/><path d="M8.5 21h7"/>',
     phone: '<path d="M5 3.5h3l1.5 4.5-2 1.5a12 12 0 0 0 5.5 5.5l1.5-2 4.5 1.5v3a1.5 1.5 0 0 1-1.6 1.5A16.5 16.5 0 0 1 3.5 5.1 1.5 1.5 0 0 1 5 3.5z"/>',
     gear: '<circle cx="12" cy="12" r="3.2"/><path d="M12 2.5v2.6M12 18.9v2.6M21.5 12h-2.6M5.1 12H2.5M18.5 5.5l-1.8 1.8M7.3 16.7l-1.8 1.8M18.5 18.5l-1.8-1.8M7.3 7.3 5.5 5.5"/>',
+    template: '<rect x="3" y="3" width="18" height="18" rx="3"/><path d="M8 8h8M8 12h8M8 16h5"/>',
+    wallet: '<path d="M4 6.5h14a2 2 0 0 1 2 2v9H4a2 2 0 0 1-2-2v-11a2 2 0 0 0 2 2z"/><path d="M15 11h7v4h-7a2 2 0 0 1 0-4z"/>',
+    support: '<path d="M4 13a8 8 0 0 1 16 0v5a2 2 0 0 1-2 2h-3"/><path d="M4 13v4H2v-4h2M20 13v4h2v-4h-2"/>',
+    shield: '<path d="M12 3 20 6v6c0 5-3.4 8-8 9-4.6-1-8-4-8-9V6l8-3z"/><path d="m9 12 2 2 4-5"/>',
     logout: '<path d="M14 3.5H6.5A1.5 1.5 0 0 0 5 5v14a1.5 1.5 0 0 0 1.5 1.5H14"/><path d="M17 8l4 4-4 4"/><path d="M21 12H9"/>'
   };
   return '<svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">' + (paths[name] || paths.grid) + '</svg>';
@@ -298,7 +315,8 @@ function renderShell() {
   root.removeAttribute('aria-busy');
   const t = State.me.tenant, u = State.me.user;
 
-  const nav = el('nav', { class: 'nav' }, ROUTES.map((r) =>
+  const visibleRoutes = ROUTES.filter((r) => !r.adminOnly || u.role === 'super_admin' || u.role === 'admin');
+  const nav = el('nav', { class: 'nav' }, visibleRoutes.map((r) =>
     el('a', { href: '#/' + r.id, 'data-route': r.id, html: navIcon(r.icon) + '<span>' + esc(r.label) + '</span>' })
   ));
 
@@ -331,8 +349,13 @@ function renderShell() {
     el('div', { class: 'health-row', id: 'healthRow' }, healthChips())
   ]);
 
-  const shell = el('div', { class: 'shell' }, [
-    side, top,
+  const impersonationBanner = State.me.impersonation ? el('div', { class: 'impersonation-banner' }, [
+    el('div', {}, [el('b', {}, 'Viewing as ' + u.email), el('span', {}, 'Read-only safety mode. Reason: ' + (State.me.impersonation.reason || 'Support review'))]),
+    el('button', { class: 'btn btn-dark', onclick: exitImpersonation }, 'Exit user view')
+  ]) : null;
+
+  const shell = el('div', { class: 'shell' + (impersonationBanner ? ' is-impersonating' : '') }, [
+    side, top, impersonationBanner,
     el('main', { class: 'main', id: 'view' }),
     el('div', { class: 'nav-scrim', onclick: () => $('.shell').classList.remove('nav-open') })
   ]);
@@ -344,6 +367,13 @@ function renderShell() {
   window.addEventListener('hashchange', onRoute);
   loadHealth();
   onRoute();
+}
+
+async function exitImpersonation() {
+  await api('/api/auth/impersonation/exit', { method: 'POST', body: {} });
+  State.me = await api('/api/me');
+  renderShell();
+  toast('Returned to super admin.', 'ok');
 }
 
 async function doLogout() {
@@ -397,7 +427,7 @@ function paintHealth() {
    =========================================================================== */
 function currentRoute() {
   const hash = (location.hash || '').replace(/^#\/?/, '').split('?')[0];
-  const found = ROUTES.find((r) => r.id === hash);
+  const found = ROUTES.find((r) => r.id === hash && (!r.adminOnly || (State.me && ['super_admin', 'admin'].includes(State.me.user.role))));
   return found ? found.id : 'overview';
 }
 function onRoute() {
@@ -412,8 +442,9 @@ function onRoute() {
   const wrap = el('div', { class: 'view' });
   view.appendChild(wrap);
   ({
-    overview: viewOverview, agents: viewAgents, studio: viewStudio,
-    talk: viewTalk, telephony: viewTelephony, settings: viewSettings
+    overview: viewOverview, agents: viewAgents, presets: viewPresets, studio: viewStudio,
+    talk: viewTalk, telephony: viewTelephony, billing: viewBilling,
+    support: viewSupport, admin: viewAdmin, settings: viewSettings
   }[id] || viewOverview)(wrap);
 }
 function goto(id) { location.hash = '#/' + id; }
@@ -823,7 +854,7 @@ function viewStudio(root) {
 
   const st = { model: 'mulberry', tone: 'neutral', speaker: 'speaker_2', f0: 0, stream: false };
 
-  const textArea = el('textarea', { class: 'textarea studio-text', id: 's_text', placeholder: 'Welcome to RapidX Voice. Production grade voice agents at roughly one rupee.' }, 'Welcome to RapidX Voice. Production grade voice agents at roughly one rupee.');
+  const textArea = el('textarea', { class: 'textarea studio-text', id: 's_text', placeholder: 'Welcome to RapidX Voice. Production-grade AI voice starts from ₹1 per minute for the AI layer.' }, 'Welcome to RapidX Voice. Production-grade AI voice starts from ₹1 per minute for the AI layer.');
 
   // model picker
   const modelSeg = el('div', { class: 'seg' }, VOICE_MODELS.map((m) =>
@@ -1080,14 +1111,188 @@ async function streamSynthesize(text, st, canvas, btn) {
    4. TALK TO IT
    =========================================================================== */
 async function viewTalk(root) {
+  root.appendChild(viewHead('Talk to your agent', 'A direct realtime voice call through the same Dograh workflow runtime used on the phone.'));
+
+  await ensureAgents().catch(() => {});
+  if (!State.activeAgentId && State.agents.length) State.activeAgentId = State.agents[0].id;
+
+  const transcript = el('div', { class: 'voice-call-stage', id: 't_voice_call', 'aria-live': 'polite' }, [
+    el('div', { class: 'voice-orb', 'aria-hidden': 'true' }, [el('span'), el('span'), el('span'), el('span'), el('span')]),
+    el('div', { class: 'voice-call-stage-title' }, 'Ready for a live voice call'),
+    el('div', { class: 'voice-call-stage-copy' }, 'Start once. Speak naturally, interrupt the agent, and continue without pressing send.')
+  ]);
+  const agentSel = el('select', { class: 'select' }, State.agents.length
+    ? State.agents.map((a) => el('option', { value: a.id, selected: a.id === State.activeAgentId ? 'selected' : false }, a.name))
+    : [el('option', { value: '' }, 'No agents yet')]);
+  agentSel.addEventListener('change', () => { State.activeAgentId = agentSel.value; });
+
+  const statusDot = el('span', { class: 'conversation-dot', 'aria-hidden': 'true' });
+  const statusText = el('span', {}, 'Ready');
+  const statusPill = el('div', { class: 'conversation-status idle', role: 'status' }, [statusDot, statusText]);
+  const runtimePill = el('div', { class: 'conversation-pipeline' }, 'Dograh realtime voice · Deepgram · Groq · Rumik');
+  const timingText = el('div', { class: 'conversation-timing', 'aria-live': 'polite' }, 'Latency is measured inside the live call runtime');
+  const sessionBtn = el('button', { class: 'btn btn-primary conversation-btn', 'aria-label': 'Start voice call' }, [
+    el('span', { class: 'conversation-btn-icon', 'aria-hidden': 'true', html: '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M22 16.9v3a2 2 0 0 1-2.18 2 19.8 19.8 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6A19.8 19.8 0 0 1 2.12 4.18 2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.12.9.33 1.78.62 2.63a2 2 0 0 1-.45 2.11L8 9.73a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c.85.29 1.73.5 2.63.62A2 2 0 0 1 22 16.9z"/></svg>' }),
+    el('span', { class: 'conversation-btn-label' }, 'Start voice call')
+  ]);
+  const audio = el('audio', { autoplay: 'autoplay', playsinline: 'playsinline' });
+
+  let pc = null;
+  let ws = null;
+  let stream = null;
+  let running = false;
+  let peerId = '';
+  let callStarted = 0;
+
+  function setStatus(phase, label) {
+    statusPill.className = 'conversation-status ' + phase;
+    statusText.textContent = label;
+  }
+  function setButton(active) {
+    running = active;
+    $('.conversation-btn-label', sessionBtn).textContent = active ? 'End voice call' : 'Start voice call';
+    sessionBtn.classList.toggle('active', active);
+    sessionBtn.setAttribute('aria-label', active ? 'End voice call' : 'Start voice call');
+    agentSel.disabled = active;
+  }
+  function appendBubble(role, text, live) {
+    $('.voice-call-stage-title', transcript).textContent = String(text || 'Voice call status');
+    return transcript;
+  }
+  function stopCall(message) {
+    setButton(false);
+    if (ws && ws.readyState < 2) { try { ws.close(); } catch (_) {} }
+    ws = null;
+    if (pc) { try { pc.getSenders().forEach((s) => s.track && s.track.stop()); pc.close(); } catch (_) {} }
+    pc = null;
+    if (stream) stream.getTracks().forEach((track) => track.stop());
+    stream = null;
+    audio.srcObject = null;
+    setStatus('idle', message || 'Ready');
+    timingText.textContent = callStarted ? 'Call ended after ' + Math.max(1, Math.round((Date.now() - callStarted) / 1000)) + 's' : 'Latency is measured inside the live call runtime';
+    callStarted = 0;
+  }
+  function securePeerId() {
+    const bytes = new Uint8Array(16); crypto.getRandomValues(bytes);
+    return 'PC-' + Array.from(bytes).map((b) => b.toString(16).padStart(2, '0')).join('');
+  }
+  async function fetchTurn(url) {
+    try {
+      const response = await fetch(url, { credentials: 'include' });
+      return response.ok ? await response.json() : null;
+    } catch (_) { return null; }
+  }
+  async function handleSignal(message) {
+    if (!pc) return;
+    if (message.type === 'answer') {
+      await pc.setRemoteDescription({ type: 'answer', sdp: message.payload.sdp });
+      return;
+    }
+    if (message.type === 'ice-candidate') {
+      const c = message.payload && message.payload.candidate;
+      if (c) await pc.addIceCandidate(c).catch(() => {});
+      return;
+    }
+    if (message.type === 'call-ended') return stopCall('Call ended');
+    if (message.type === 'error' || message.type === 'rtf-pipeline-error') {
+      const detail = (message.payload && (message.payload.message || message.payload.error)) || 'Realtime voice call failed';
+      appendBubble('bot', detail, false);
+      setStatus('error', 'Call error');
+      return;
+    }
+    if (message.type === 'rtf-user-transcription') {
+      const p = message.payload || {};
+      if (p.text) setStatus('thinking', p.final ? 'Agent thinking' : 'Listening');
+      return;
+    }
+    if (message.type === 'rtf-bot-text') {
+      return;
+    }
+    if (message.type === 'rtf-bot-started-speaking') setStatus('speaking', 'Agent speaking');
+    if (message.type === 'rtf-bot-stopped-speaking') setStatus('listening', 'Listening');
+    if (message.type === 'rtf-ttfb-metric') {
+      const p = message.payload || {};
+      timingText.textContent = (Number(p.ttfb_seconds || 0) * 1000).toFixed(0) + 'ms first response · ' + String(p.processor || p.model || 'live runtime');
+    }
+  }
+  async function startCall() {
+    if (running || !State.activeAgentId) return;
+    setButton(true); setStatus('connecting', 'Connecting realtime call');
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
+      const session = await api('/api/voice/session', { method: 'POST', timeoutMs: 15000, body: { agentId: State.activeAgentId } });
+      // Prefer the same-origin session response. A direct credentialed fetch to
+      // Dograh can be rejected by browsers when its CORS response uses `*`.
+      const turn = session.turnCredentials || await fetchTurn(session.turnCredentialsUrl);
+      const iceServers = [{ urls: ['stun:stun.l.google.com:19302'] }];
+      if (turn && turn.uris && turn.uris.length) {
+        iceServers.push({ urls: turn.uris, username: turn.username, credential: turn.password });
+      }
+      pc = new RTCPeerConnection({ iceServers, iceTransportPolicy: turn ? 'relay' : 'all' });
+      window.__rumikPc = pc;
+      stream.getTracks().forEach((track) => pc.addTrack(track, stream));
+      pc.ontrack = (event) => { if (event.track.kind === 'audio') { audio.srcObject = event.streams[0]; audio.play().catch(() => {}); } };
+      pc.onconnectionstatechange = () => {
+        if (!pc) return;
+        console.log('Rumik WebRTC state', pc.connectionState, pc.iceConnectionState);
+        timingText.textContent = 'WebRTC ' + pc.connectionState + ' · ICE ' + pc.iceConnectionState;
+        if (pc.connectionState === 'connected') { callStarted = Date.now(); setStatus('listening', 'Live call connected'); }
+        if (pc.connectionState === 'failed') { setStatus('error', 'Connection failed'); stopCall('Connection failed'); }
+      };
+      peerId = securePeerId();
+      ws = new WebSocket(session.signalingUrl);
+      ws.onmessage = async (event) => {
+        try { await handleSignal(JSON.parse(event.data)); }
+        catch (error) { setStatus('error', 'Signaling error'); toast(error.message || 'Realtime signaling failed.', 'err'); }
+      };
+      ws.onclose = (event) => { if (running && event.reason !== 'call ended') stopCall('Call ended'); };
+      await new Promise((resolve, reject) => { ws.onopen = resolve; ws.onerror = () => reject(new Error('Dograh signaling connection failed')); });
+      pc.onicecandidate = (event) => {
+        if (!ws || ws.readyState !== WebSocket.OPEN) return;
+        console.log('Rumik WebRTC candidate', event.candidate ? event.candidate.type : 'complete');
+        if (event.candidate) timingText.textContent = 'ICE candidate: ' + event.candidate.type + ' · ' + event.candidate.protocol;
+        ws.send(JSON.stringify({ type: 'ice-candidate', payload: { candidate: event.candidate ? { candidate: event.candidate.candidate, sdpMid: event.candidate.sdpMid, sdpMLineIndex: event.candidate.sdpMLineIndex } : null, pc_id: peerId } }));
+      };
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      ws.send(JSON.stringify({ type: 'offer', payload: { sdp: offer.sdp, type: 'offer', pc_id: peerId, workflow_id: session.workflowId, workflow_run_id: session.workflowRunId } }));
+    } catch (error) {
+      stopCall('Could not connect');
+      setStatus('error', 'Needs attention');
+      appendBubble('bot', error.message || 'Could not start the realtime voice call.', false);
+      toast(error.message || 'Realtime voice call failed.', 'err');
+    }
+  }
+
+  sessionBtn.addEventListener('click', () => running ? stopCall('Ready') : startCall());
+
+  const panel = el('div', { class: 'card talk-panel' }, [
+    el('div', { class: 'talk-head' }, [
+      el('div', { class: 'talk-identity' }, [el('div', { class: 'who' }, ['Phone-runtime conversation ', el('span', {}, '(automatic turn-taking)')]), statusPill, runtimePill, timingText]),
+      el('div', { class: 'talk-agent-select' }, [el('span', {}, 'Agent'), agentSel])
+    ]),
+    transcript,
+    el('div', { class: 'talk-input' }, [sessionBtn, audio])
+  ]);
+  const info = el('div', { class: 'talk-side' }, [el('div', { class: 'card card-pad' }, [
+    el('h3', { class: 't-h3' }, 'The actual phone runtime'),
+    el('p', { class: 'muted' }, 'Your microphone is connected to Dograh over WebRTC. Dograh runs the same published workflow, Deepgram, Groq and Rumik pipeline used for phone calls.'),
+    el('hr', { class: 'divider' }),
+    el('p', { class: 'muted' }, 'Turn detection, interruption, agent speech and latency now happen inside the call engine. Transcript text is a live diagnostic view, not the mechanism driving the page.'),
+    el('p', { class: 'muted' }, 'Use End voice call to release the microphone and close the peer connection.')
+  ])]);
+  root.appendChild(el('div', { class: 'talk-grid' }, [panel, info]));
+}
+
+async function viewTalkLegacy(root) {
   root.appendChild(viewHead('Talk to it', 'A live loop. Speak or type, the agent thinks with the brain, then answers in its own voice.'));
 
   await ensureAgents().catch(() => {});
   if (!State.activeAgentId && State.agents.length) State.activeAgentId = State.agents[0].id;
 
   const convo = []; // { role:'user'|'bot', text }
-  const transcript = el('div', { class: 'transcript', id: 't_transcript' }, [
-    el('div', { class: 'bubble sys' }, State.agents.length ? 'Say hello, or type below to start.' : 'Create an agent first, then come back to talk to it.')
+  const transcript = el('div', { class: 'transcript', id: 't_transcript', 'aria-live': 'polite' }, [
+    el('div', { class: 'bubble sys' }, State.agents.length ? 'Start a conversation. The agent will greet you, listen automatically and keep the call going.' : 'Create an agent first, then come back to talk to it.')
   ]);
 
   const agentSel = el('select', { class: 'select' }, State.agents.length
@@ -1097,10 +1302,15 @@ async function viewTalk(root) {
 
   const textIn = el('input', { class: 'input', placeholder: State.agents.length ? 'Type a message...' : 'Create an agent to begin', disabled: State.agents.length ? false : 'disabled' });
   const sendBtn = el('button', { class: 'btn btn-primary' }, 'Send');
-  const micBtn = el('button', { class: 'mic-btn', title: 'Hold to talk', 'aria-label': 'Microphone', html: '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="2.5" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0"/><path d="M12 17.5V21"/><path d="M8.5 21h7"/></svg>' });
-
-  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-  const sttMode = SR ? 'webspeech' : 'record';
+  const sessionBtn = el('button', { class: 'btn btn-primary conversation-btn', 'aria-label': 'Start conversation' }, [
+    el('span', { class: 'conversation-btn-icon', 'aria-hidden': 'true', html: '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M22 16.9v3a2 2 0 0 1-2.18 2 19.8 19.8 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6A19.8 19.8 0 0 1 2.12 4.18 2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.12.9.33 1.78.62 2.63a2 2 0 0 1-.45 2.11L8 9.73a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c.85.29 1.73.5 2.63.62A2 2 0 0 1 22 16.9z"/></svg>' }),
+    el('span', { class: 'conversation-btn-label' }, 'Start conversation')
+  ]);
+  const statusDot = el('span', { class: 'conversation-dot', 'aria-hidden': 'true' });
+  const statusText = el('span', {}, 'Ready');
+  const statusPill = el('div', { class: 'conversation-status idle', role: 'status' }, [statusDot, statusText]);
+  const pipelinePill = el('div', { class: 'conversation-pipeline' }, 'Deepgram Nova-3 → Groq Llama 3.3 70B → Rumik Mulberry');
+  const timingText = el('div', { class: 'conversation-timing', 'aria-live': 'polite' }, 'Latency appears after the first turn');
 
   function getActiveAgent() { return State.agents.find((a) => a.id === State.activeAgentId) || State.agents[0]; }
 
@@ -1116,100 +1326,492 @@ async function viewTalk(root) {
     transcript.appendChild(b); transcript.scrollTop = transcript.scrollHeight; return b;
   }
 
+  let sessionActive = false;
+  let phase = 'idle';
+  let busy = false;
+  let mediaStream = null;
+  let audioCtx = null;
+  let analyser = null;
+  let mediaRec = null;
+  let deepgramSocket = null;
+  let vadTimer = null;
+  let recChunks = [];
+  let discardCapture = false;
+  let currentAudio = null;
+  let activeSpeechSources = [];
+  let liveBubble = null;
+  let turnId = 0;
+  const turnTiming = { stt: null, llm: null, tts: null };
+
+  const PHASE_LABELS = {
+    idle: 'Ready', connecting: 'Connecting microphone', listening: 'Listening',
+    transcribing: 'Transcribing', thinking: 'Thinking', speaking: 'Agent speaking', error: 'Needs attention'
+  };
+
+  function setPhase(next) {
+    phase = next;
+    statusPill.className = 'conversation-status ' + next;
+    statusText.textContent = PHASE_LABELS[next] || next;
+    transcript.setAttribute('data-phase', next);
+  }
+
+  function updateTiming() {
+    const parts = [];
+    if (turnTiming.stt != null) parts.push('STT ' + (turnTiming.stt / 1000).toFixed(2) + 's');
+    if (turnTiming.llm != null) parts.push('Groq ' + (turnTiming.llm / 1000).toFixed(2) + 's');
+    if (turnTiming.tts != null) parts.push('Rumik ' + (turnTiming.tts / 1000).toFixed(2) + 's');
+    timingText.textContent = parts.length ? parts.join('  ·  ') : 'Latency appears after the first turn';
+  }
+
+  function setSessionButton(active) {
+    const label = $('.conversation-btn-label', sessionBtn);
+    label.textContent = active ? 'End conversation' : 'Start conversation';
+    sessionBtn.classList.toggle('active', active);
+    sessionBtn.setAttribute('aria-label', active ? 'End conversation' : 'Start conversation');
+  }
+
+  function clearVad() {
+    if (vadTimer) clearInterval(vadTimer);
+    vadTimer = null;
+  }
+
+  function paintLiveTranscript(text) {
+    text = String(text || '').trim();
+    if (!text) return;
+    if (!liveBubble || !liveBubble.isConnected) {
+      liveBubble = el('div', { class: 'bubble user live-transcript' }, text);
+      transcript.appendChild(liveBubble);
+    } else {
+      liveBubble.textContent = text;
+    }
+    transcript.scrollTop = transcript.scrollHeight;
+  }
+
+  function clearLiveTranscript() {
+    if (liveBubble && liveBubble.isConnected) liveBubble.remove();
+    liveBubble = null;
+  }
+
+  async function openDeepgramStream() {
+    const wsScheme = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const socket = new WebSocket(wsScheme + '//' + location.host + '/api/stt/stream');
+    deepgramSocket = socket;
+    const segments = [];
+    let interim = '';
+    let finalizeStarted = 0;
+    let settled = false;
+    let resolveFinal;
+    let rejectFinal;
+    let finalizeTimer = null;
+    const finalText = new Promise((resolve, reject) => { resolveFinal = resolve; rejectFinal = reject; });
+    const settle = (text) => {
+      if (settled) return;
+      settled = true;
+      if (finalizeTimer) clearTimeout(finalizeTimer);
+      if (finalizeStarted) turnTiming.stt = Date.now() - finalizeStarted;
+      updateTiming();
+      resolveFinal(String(text || '').trim());
+    };
+
+    let resolveReady;
+    let rejectReady;
+    let readyResolved = false;
+    const ready = new Promise((resolve, reject) => { resolveReady = resolve; rejectReady = reject; });
+
+    socket.onmessage = (ev) => {
+      let msg; try { msg = JSON.parse(ev.data); } catch { return; }
+      if (msg.type === 'ProxyReady') { readyResolved = true; resolveReady(); return; }
+      if (msg.type === 'ProxyError') {
+        const err = new Error(msg.message || 'Deepgram live stream failed.');
+        rejectReady(err);
+        if (readyResolved && !settled) rejectFinal(err);
+        return;
+      }
+      if (msg.type !== 'Results') return;
+      const alt = ((((msg.channel || {}).alternatives) || [])[0]) || {};
+      const text = String(alt.transcript || '').trim();
+      if (text) {
+        if (msg.is_final) {
+          if (segments[segments.length - 1] !== text) segments.push(text);
+          interim = '';
+        } else {
+          interim = text;
+        }
+        paintLiveTranscript(segments.concat(interim ? [interim] : []).join(' '));
+      }
+      if (msg.from_finalize) settle(segments.concat(interim ? [interim] : []).join(' '));
+    };
+    socket.onerror = () => {
+      const err = new Error('Deepgram live stream failed.');
+      if (!readyResolved) rejectReady(err);
+      else if (!settled) rejectFinal(err);
+    };
+    socket.onclose = () => {
+      if (!readyResolved) rejectReady(new Error('Deepgram connection closed early.'));
+      else if (!settled) settle(segments.concat(interim ? [interim] : []).join(' '));
+    };
+
+    const readyTimeout = setTimeout(() => rejectReady(new Error('Deepgram connection timed out.')), 8000);
+    socket.addEventListener('error', () => rejectReady(new Error('Deepgram connection failed.')), { once: true });
+    try {
+      await ready.finally(() => clearTimeout(readyTimeout));
+    } catch (e) {
+      try { socket.close(); } catch (_) {}
+      throw e;
+    }
+
+    return {
+      socket,
+      finalText,
+      finalize() {
+        if (socket.readyState !== WebSocket.OPEN) return settle(segments.join(' '));
+        finalizeStarted = Date.now();
+        socket.send(JSON.stringify({ type: 'Finalize' }));
+        finalizeTimer = setTimeout(() => settle(segments.concat(interim ? [interim] : []).join(' ')), 2500);
+      },
+      close() {
+        if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: 'CloseStream' }));
+        try { socket.close(); } catch (e) {}
+      }
+    };
+  }
+
+  function cancelCapture() {
+    clearVad();
+    if (mediaRec && mediaRec.state === 'recording') {
+      discardCapture = true;
+      try { mediaRec.stop(); } catch (e) {}
+    }
+    if (deepgramSocket) { try { deepgramSocket.close(); } catch (e) {} deepgramSocket = null; }
+    clearLiveTranscript();
+  }
+
   async function runTurn(userText) {
     userText = (userText || '').trim();
-    if (!userText) return;
+    if (!userText || busy) return;
     const agent = getActiveAgent();
     if (!agent) { toast('Pick an agent first.', 'err'); return; }
+    cancelCapture();
+    const myTurn = ++turnId;
+    busy = true;
     addBubble('user', userText);
     convo.push({ role: 'user', text: userText });
     textIn.value = '';
     const typing = addTyping();
+    setPhase('thinking');
     try {
-      const chat = await api('/api/chat', { method: 'POST', body: { messages: convo.map((m) => ({ role: m.role === 'bot' ? 'model' : 'user', text: m.text })), system: agent.persona } });
+      const chat = await api('/api/chat', {
+        method: 'POST', timeoutMs: 30000,
+        body: { messages: convo.map((m) => ({ role: m.role === 'bot' ? 'model' : 'user', text: m.text })), system: agent.persona }
+      });
+      turnTiming.llm = Number(chat.latency_ms) || null;
+      updateTiming();
+      if (myTurn !== turnId) { typing.remove(); return; }
       const reply = (chat.text || '').trim() || 'Sorry, I did not catch that.';
       typing.remove();
       addBubble('bot', reply);
       convo.push({ role: 'bot', text: reply });
-      // speak it
-      speakReply(reply, agent);
+      setPhase('speaking');
+      await speakReply(reply, agent);
     } catch (ex) {
       typing.remove();
-      addBubble('bot', 'I hit an error reaching the brain. ' + (ex.message || ''));
+      addBubble('sys', 'The turn failed: ' + (ex.message || 'unknown error'));
+      setPhase('error');
       toast(ex.message || 'Chat failed.', 'err');
+    } finally {
+      busy = false;
+      if (sessionActive) listenForTurn();
+      else if (phase !== 'error') setPhase('idle');
     }
   }
 
   async function speakReply(text, agent) {
     const tts = agent.tts || {};
+    const ttsStarted = performance.now();
     try {
-      const res = await api('/api/tts', { method: 'POST', body: { text: text.slice(0, 2000), model: tts.model || 'mulberry', speaker: tts.speaker, f0_up_key: tts.f0_up_key, description: tts.description } });
-      const buf = await res.arrayBuffer();
-      const url = URL.createObjectURL(new Blob([buf], { type: 'audio/wav' }));
-      const audio = new Audio(url); audio.onended = () => URL.revokeObjectURL(url);
-      audio.play().catch(() => URL.revokeObjectURL(url));
-    } catch (ex) { /* voice is best effort, transcript already shown */ }
+      const mint = await api('/api/ws-connect', {
+        method: 'POST', timeoutMs: 12000,
+        body: { text: text.slice(0, 2000), model: tts.model || 'mulberry' }
+      });
+      if (!mint.ws_url) throw new Error('Rumik stream URL was not returned.');
+      const url = mint.ws_url + (mint.token && mint.ws_url.indexOf('token=') === -1
+        ? (mint.ws_url.indexOf('?') === -1 ? '?' : '&') + 'token=' + encodeURIComponent(mint.token)
+        : '');
+      const playbackContext = audioCtx || new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 24000 });
+      if (playbackContext.state === 'suspended') await playbackContext.resume();
+      await new Promise((resolve, reject) => {
+        const socket = new WebSocket(url);
+        socket.binaryType = 'arraybuffer';
+        let nextTime = 0;
+        let receivedAudio = false;
+        let finished = false;
+        const timeout = setTimeout(() => finish(new Error('Rumik stream timed out.')), 20000);
+
+        function finish(error) {
+          if (finished) return;
+          finished = true;
+          clearTimeout(timeout);
+          try { socket.close(); } catch (_) {}
+          if (error) return reject(error);
+          const remainingMs = Math.max(0, (nextTime - playbackContext.currentTime) * 1000);
+          setTimeout(resolve, remainingMs + 30);
+        }
+
+        socket.onopen = () => {
+          const frame = { text: text.slice(0, 2000), model: tts.model || 'mulberry' };
+          if (frame.model === 'mulberry') {
+            if (tts.description) frame.description = tts.description;
+            else frame.speaker = tts.speaker || 'speaker_1';
+            frame.f0_up_key = Number.isFinite(tts.f0_up_key) ? tts.f0_up_key : 0;
+          }
+          socket.send(JSON.stringify(frame));
+        };
+        socket.onmessage = (event) => {
+          if (typeof event.data === 'string') {
+            try {
+              const message = JSON.parse(event.data);
+              if (message.type === 'end' || message.type === 'done' || message.done) finish(receivedAudio ? null : new Error('Rumik returned no audio.'));
+            } catch (_) {}
+            return;
+          }
+          const pcm = new Int16Array(event.data);
+          if (!pcm.length) return;
+          if (!receivedAudio) {
+            receivedAudio = true;
+            turnTiming.tts = Math.round(performance.now() - ttsStarted);
+            updateTiming();
+          }
+          const samples = new Float32Array(pcm.length);
+          for (let i = 0; i < pcm.length; i++) samples[i] = pcm[i] / 32768;
+          const buffer = playbackContext.createBuffer(1, samples.length, 24000);
+          buffer.copyToChannel(samples, 0);
+          const source = playbackContext.createBufferSource();
+          source.buffer = buffer;
+          source.connect(playbackContext.destination);
+          source.onended = () => { activeSpeechSources = activeSpeechSources.filter((item) => item !== source); };
+          activeSpeechSources.push(source);
+          if (nextTime < playbackContext.currentTime) nextTime = playbackContext.currentTime + 0.025;
+          source.start(nextTime);
+          nextTime += buffer.duration;
+        };
+        socket.onerror = () => finish(new Error('Rumik stream connection failed.'));
+        socket.onclose = () => { if (!finished) finish(receivedAudio ? null : new Error('Rumik stream closed early.')); };
+      });
+    } catch (streamError) {
+      // Keep a reliable batch fallback, but the normal path above starts audio
+      // on Rumik's first PCM chunk and is the path reflected in the latency UI.
+      try {
+        const res = await api('/api/tts', { method: 'POST', timeoutMs: 60000, body: { text: text.slice(0, 2000), model: tts.model || 'mulberry', speaker: tts.speaker, f0_up_key: tts.f0_up_key, description: tts.description } });
+        const buf = await res.arrayBuffer();
+        turnTiming.tts = Math.round(performance.now() - ttsStarted);
+        updateTiming();
+        const url = URL.createObjectURL(new Blob([buf], { type: 'audio/wav' }));
+        const audio = new Audio(url);
+        currentAudio = audio;
+        await new Promise((resolve) => {
+          const done = () => { URL.revokeObjectURL(url); if (currentAudio === audio) currentAudio = null; resolve(); };
+          audio.onended = done;
+          audio.onerror = done;
+          audio.play().catch(done);
+        });
+      } catch (_) {
+        toast('Voice playback failed, the transcript is still available.', 'err');
+      }
+    }
   }
 
   sendBtn.addEventListener('click', () => runTurn(textIn.value));
   textIn.addEventListener('keydown', (e) => { if (e.key === 'Enter') runTurn(textIn.value); });
 
-  // mic
-  let recognizing = false, recognition = null, mediaRec = null, recChunks = [];
-  micBtn.addEventListener('click', async () => {
-    if (!window.isSecureContext) { toast('Mic needs a secure (HTTPS) connection, your browser blocks it on http. Type your message below to chat for now.', 'err'); return; }
-    if (!State.agents.length) { toast('Create an agent first.', 'err'); return; }
-    if (sttMode === 'webspeech') {
-      if (recognizing) { try { recognition.stop(); } catch (e) {} return; }
-      recognition = new SR();
-      recognition.lang = 'en-IN'; recognition.interimResults = false; recognition.maxAlternatives = 1;
-      recognition.onresult = (ev) => { const txt = ev.results[0][0].transcript; runTurn(txt); };
-      recognition.onerror = (ev) => { toast('Mic error: ' + (ev.error || 'unknown') + '. You can type instead.', 'err'); };
-      recognition.onend = () => { recognizing = false; micBtn.classList.remove('rec'); };
-      try { recognition.start(); recognizing = true; micBtn.classList.add('rec'); toast('Listening...', 'info'); }
-      catch (e) { toast('Could not start the mic.', 'err'); }
-    } else {
-      // record + POST to /api/stt fallback
-      if (mediaRec && mediaRec.state === 'recording') { mediaRec.stop(); return; }
-      try {
-        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-        recChunks = [];
-        mediaRec = new MediaRecorder(stream);
-        mediaRec.ondataavailable = (e) => { if (e.data.size) recChunks.push(e.data); };
-        mediaRec.onstop = async () => {
-          micBtn.classList.remove('rec');
-          stream.getTracks().forEach((t) => t.stop());
-          const blob = new Blob(recChunks, { type: mediaRec.mimeType || 'audio/webm' });
-          const b64 = await blobToBase64(blob);
-          toast('Transcribing...', 'info');
-          try {
-            const r = await api('/api/stt', { method: 'POST', body: { audio: b64, mime: blob.type } });
-            if (r.text) runTurn(r.text); else toast('Could not transcribe that.', 'err');
-          } catch (ex) { toast(ex.message || 'Transcription failed.', 'err'); }
-        };
-        mediaRec.start(); micBtn.classList.add('rec'); toast('Recording, tap again to stop.', 'info');
-      } catch (e) { toast('Mic permission denied. You can type instead.', 'err'); }
+  async function listenForTurn() {
+    if (!sessionActive || busy || !mediaStream || !analyser) return;
+    clearVad();
+    discardCapture = false;
+    recChunks = [];
+
+    setPhase('connecting');
+    let dg;
+    try {
+      dg = await openDeepgramStream();
+    } catch (ex) {
+      setPhase('error');
+      addBubble('sys', 'Deepgram could not open a live transcription stream. Retrying.');
+      toast(ex.message || 'Deepgram connection failed.', 'err');
+      if (sessionActive) setTimeout(listenForTurn, 900);
+      return;
     }
+
+    const mime = MediaRecorder.isTypeSupported('audio/webm;codecs=opus') ? 'audio/webm;codecs=opus' : '';
+    mediaRec = new MediaRecorder(mediaStream, mime ? { mimeType: mime } : undefined);
+    const samples = new Uint8Array(analyser.fftSize);
+    const captureStartedAt = Date.now();
+    const audioSends = [];
+    let speechStarted = false;
+    let speechStartedAt = 0;
+    let lastVoiceAt = 0;
+
+    mediaRec.ondataavailable = (e) => {
+      if (!e.data.size) return;
+      recChunks.push(e.data);
+      if (dg.socket.readyState === WebSocket.OPEN) {
+        const sent = e.data.arrayBuffer().then((buf) => {
+          if (dg.socket.readyState === WebSocket.OPEN) dg.socket.send(buf);
+        }).catch(() => {});
+        audioSends.push(sent);
+      }
+    };
+    mediaRec.onstop = async () => {
+      clearVad();
+      const chunks = recChunks.slice();
+      if (discardCapture) { discardCapture = false; dg.close(); return; }
+      if (!sessionActive) return;
+      if (!speechStarted || !chunks.length) {
+        dg.close();
+        setTimeout(listenForTurn, 180);
+        return;
+      }
+
+      const blob = new Blob(chunks, { type: mediaRec.mimeType || 'audio/webm' });
+      if (blob.size < 900) { dg.close(); setTimeout(listenForTurn, 180); return; }
+      setPhase('transcribing');
+      try {
+        await Promise.all(audioSends);
+        dg.finalize();
+        let words = await dg.finalText;
+        dg.close();
+        if (!words) {
+          const b64 = await blobToBase64(blob);
+          const fallback = await api('/api/stt', { method: 'POST', timeoutMs: 45000, body: { audio: b64, mime: blob.type } });
+          words = String(fallback.text || '').trim();
+          turnTiming.stt = Number(fallback.latency_ms) || turnTiming.stt;
+        }
+        turnTiming.llm = null;
+        turnTiming.tts = null;
+        updateTiming();
+        clearLiveTranscript();
+        if (words) await runTurn(String(words).trim());
+        else if (sessionActive) listenForTurn();
+      } catch (ex) {
+        dg.close();
+        clearLiveTranscript();
+        addBubble('sys', 'I could not transcribe that turn. I am listening again.');
+        toast(ex.message || 'Transcription failed.', 'err');
+        if (sessionActive) listenForTurn();
+      }
+    };
+
+    mediaRec.start(250);
+    setPhase('listening');
+    vadTimer = setInterval(() => {
+      if (!sessionActive || !mediaRec || mediaRec.state !== 'recording') return;
+      analyser.getByteTimeDomainData(samples);
+      let sum = 0;
+      for (let i = 0; i < samples.length; i++) {
+        const v = (samples[i] - 128) / 128;
+        sum += v * v;
+      }
+      const rms = Math.sqrt(sum / samples.length);
+      const now = Date.now();
+      if (rms >= 0.022) {
+        if (!speechStarted) { speechStarted = true; speechStartedAt = now; }
+        lastVoiceAt = now;
+      }
+      const endedTurn = speechStarted && now - speechStartedAt > 280 && now - lastVoiceAt > 900;
+      const maxTurn = now - captureStartedAt > 30000;
+      if (endedTurn || maxTurn) {
+        try { mediaRec.stop(); } catch (e) {}
+      }
+    }, 60);
+  }
+
+  async function startConversation() {
+    if (sessionActive) return;
+    if (!window.isSecureContext) {
+      toast('A live conversation needs the secure HTTPS Studio URL.', 'err');
+      return;
+    }
+    const agent = getActiveAgent();
+    if (!agent) { toast('Create or select an agent first.', 'err'); return; }
+    if (!navigator.mediaDevices || !window.MediaRecorder) {
+      toast('This browser cannot open an audio call. Use a current Chrome, Brave, Edge or Safari build.', 'err');
+      return;
+    }
+
+    setPhase('connecting');
+    sessionBtn.disabled = true;
+    try {
+      mediaStream = await navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }
+      });
+      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      if (audioCtx.state === 'suspended') await audioCtx.resume();
+      analyser = audioCtx.createAnalyser();
+      analyser.fftSize = 2048;
+      audioCtx.createMediaStreamSource(mediaStream).connect(analyser);
+      sessionActive = true;
+      agentSel.disabled = true;
+      setSessionButton(true);
+      const greeting = String(agent.greeting || 'Hello, how can I help you today?').trim();
+      addBubble('bot', greeting);
+      convo.push({ role: 'bot', text: greeting });
+      setPhase('speaking');
+      await speakReply(greeting, agent);
+      if (sessionActive) listenForTurn();
+    } catch (e) {
+      toast('Microphone access failed. Allow the mic for this site, then start again.', 'err');
+      endConversation(false);
+      setPhase('error');
+    } finally {
+      sessionBtn.disabled = false;
+    }
+  }
+
+  function endConversation(showMessage) {
+    const wasActive = sessionActive;
+    sessionActive = false;
+    turnId += 1;
+    cancelCapture();
+    if (currentAudio) { try { currentAudio.pause(); } catch (e) {} currentAudio = null; }
+    activeSpeechSources.forEach((source) => { try { source.stop(); } catch (_) {} });
+    activeSpeechSources = [];
+    if (mediaStream) mediaStream.getTracks().forEach((t) => t.stop());
+    mediaStream = null;
+    analyser = null;
+    if (audioCtx) { try { audioCtx.close(); } catch (e) {} }
+    audioCtx = null;
+    agentSel.disabled = false;
+    setSessionButton(false);
+    setPhase('idle');
+    if (wasActive && showMessage !== false) addBubble('sys', 'Conversation ended.');
+  }
+
+  sessionBtn.addEventListener('click', () => {
+    if (sessionActive) endConversation(true);
+    else startConversation();
   });
 
   const panel = el('div', { class: 'card talk-panel' }, [
     el('div', { class: 'talk-head' }, [
-      el('div', { class: 'who' }, [document.createTextNode('Active agent '), el('span', {}, sttMode === 'webspeech' ? '(voice ready)' : '(server transcription)')]),
-      agentSel
+      el('div', { class: 'talk-identity' }, [
+        el('div', { class: 'who' }, [document.createTextNode('Live conversation '), el('span', {}, '(automatic turn-taking)')]),
+        statusPill,
+        pipelinePill,
+        timingText
+      ]),
+      el('div', { class: 'talk-agent-select' }, [el('span', {}, 'Agent'), agentSel])
     ]),
     transcript,
-    el('div', { class: 'talk-input' }, [micBtn, textIn, sendBtn])
+    el('div', { class: 'talk-input' }, [sessionBtn, textIn, sendBtn])
   ]);
 
   const side = el('div', { class: 'talk-side' }, [
     el('div', { class: 'card card-pad' }, [
       el('h3', { class: 't-h3' }, 'How it works'),
-      el('p', { class: 'soft', style: 'font-size:.88rem' }, 'Your turn goes to the brain with the agent persona as the system prompt. The reply is spoken back in the agent voice.'),
+      el('p', { class: 'soft', style: 'font-size:.88rem' }, 'Start once. Rumik greets you, then Deepgram streams every word into the transcript while you speak. Groq answers, Rumik speaks, and listening resumes automatically.'),
       el('div', { class: 'divider', style: 'margin:6px 0' }),
-      el('div', { class: 'soft', style: 'font-size:.84rem' }, sttMode === 'webspeech'
-        ? 'Voice input uses your browser speech engine. Tap the mic, speak, and it sends automatically.'
-        : 'Your browser has no speech engine, so the mic records and we transcribe on the server. Tap the mic to start and stop.'),
-      el('div', { class: 'soft', style: 'font-size:.84rem;margin-top:10px' }, 'No mic. Just type in the box, it works everywhere.')
+      el('div', { class: 'soft', style: 'font-size:.84rem' },
+        'The status and measured Deepgram, Groq and Rumik latency make every stage of the turn explicit.'),
+      el('div', { class: 'soft', style: 'font-size:.84rem;margin-top:10px' }, 'Use End conversation to release the microphone. Typed messages remain available at any time.')
     ])
   ]);
 
@@ -1228,7 +1830,7 @@ function blobToBase64(blob) {
    5. TELEPHONY
    =========================================================================== */
 async function viewTelephony(root) {
-  root.appendChild(viewHead('Telephony', 'Your live numbers, wallet, and call routing. Place outbound calls with an explicit confirmation.'));
+  root.appendChild(viewHead('Telephony', 'Your VoBiz numbers and call routing, connected through Dograh. Outbound calls require an explicit confirmation.'));
 
   const statusHost = el('div', { class: 'card card-pad', id: 'telStatus' }, skeleton('sk-line', 5));
   const dialHost = el('div', { class: 'card card-pad' }, dialForm());
@@ -1240,59 +1842,56 @@ async function viewTelephony(root) {
     refreshDialNumbers(s);
   } catch (e) {
     statusHost.innerHTML = '';
-    statusHost.appendChild(el('div', { class: 'muted' }, 'Could not reach telephony. ' + esc(e.message)));
+    statusHost.appendChild(el('div', { class: 'muted' }, 'Could not reach VoBiz through Dograh. ' + esc(e.message)));
   }
 }
 
 function paintTelephony(host, s) {
   host.innerHTML = '';
-  const wallet = s.wallet || {};
-  const bal = wallet.balance != null ? wallet.balance : (s.balance != null ? s.balance : null);
-  const cur = wallet.currency || s.currency || 'INR';
-  // Telephony is healthy if VoiceLink answered with a wallet or live DIDs. The
-  // separate engine-tunnel field may read "not set" without meaning telephony is down.
-  const reachable = (bal != null) || (Array.isArray(s.dids) && s.dids.length > 0);
-  const engineUp = reachable ? true
-    : (s.engine == null ? null
-        : (/unreachable|not set/i.test(String(s.engine)) ? false : true));
-  const routeList = Array.isArray(s.routing) ? s.routing : (s.engine && Array.isArray(s.engine.routing) ? s.engine.routing : []);
-  const routing = routeList.length
-    ? routeList.map((r) => (r.did_number || r.did || '?') + ' → ' + (r.outbound_websocket_bot_name || ('bot ' + (r.outbound_websocket_bot_id || '?')))).join(',  ')
-    : 'not configured';
+  const connected = s.connected === true && s.provider === 'vobiz' && s.orchestrator === 'dograh';
+  const config = s.configuration || {};
+  const didList = Array.isArray(s.dids) ? s.dids : (s.did ? [{ number: s.did, status: 'active' }] : []);
 
   host.appendChild(el('div', { class: 'flex items-center justify-between', style: 'margin-bottom:14px' }, [
-    el('h3', { class: 't-h3' }, 'Engine status'),
-    el('span', { class: 'pill' }, [el('span', { class: 'dot' + (engineUp === false ? ' bad' : engineUp === null ? ' warn' : '') }), engineUp === false ? 'down' : engineUp === null ? 'unknown' : 'healthy'])
+    el('h3', { class: 't-h3' }, 'VoBiz via Dograh'),
+    el('span', { class: 'pill' }, [
+      el('span', { class: 'dot' + (connected ? '' : ' bad') }),
+      connected ? 'connected' : 'unavailable'
+    ])
   ]));
 
-  if (bal != null) {
-    host.appendChild(el('div', { style: 'margin-bottom:16px' }, [
-      el('div', { class: 'muted', style: 'font-size:.8rem' }, 'Wallet balance'),
-      el('div', { class: 'wallet-big' }, [document.createTextNode(cur === 'INR' ? '₹' : (cur + ' ')), document.createTextNode(fmtInr(bal)), el('small', {}, ' ' + cur)])
-    ]));
-  }
-
-  // DIDs
-  const didList = s.dids || (s.did ? [{ number: s.did, status: 'active' }] : []);
   if (didList.length) {
-    host.appendChild(el('div', { class: 'muted', style: 'font-size:.8rem;margin-bottom:8px' }, 'Numbers'));
+    host.appendChild(el('div', { class: 'muted', style: 'font-size:.8rem;margin-bottom:8px' }, 'VoBiz numbers'));
     didList.forEach((d) => {
       const num = typeof d === 'string' ? d : (d.did_number || d.number || d.did || '');
       const status = d.user_status_label || d.status || 'active';
       const exp = d.expiry_date || d.expiry || d.expires || d.expiresAt;
+      const route = d.inboundWorkflowName || (d.inboundWorkflowId ? 'Workflow ' + d.inboundWorkflowId : 'No inbound workflow');
       host.appendChild(el('div', { class: 'did-row' }, [
-        el('div', {}, [el('div', { class: 'num' }, num), exp ? el('div', { class: 'exp' }, 'Expires ' + exp) : null]),
+        el('div', {}, [
+          el('div', { class: 'num' }, num),
+          el('div', { class: 'exp' }, exp ? 'Expires ' + exp : route)
+        ]),
         el('span', { class: 'pill' }, [el('span', { class: 'dot' + (status !== 'active' ? ' warn' : '') }), status])
       ]));
     });
   }
 
   host.appendChild(el('div', { class: 'divider', style: 'margin:14px 0' }));
-  host.appendChild(el('div', { class: 'status-line' }, [el('span', { class: 'k' }, 'Routing'), el('span', { class: 'v' }, String(routing))]));
-  if (s.engine && s.engine.version) host.appendChild(el('div', { class: 'status-line' }, [el('span', { class: 'k' }, 'Engine'), el('span', { class: 'v' }, String(s.engine.version))]));
-  if (s.dashboard) host.appendChild(el('div', { class: 'status-line' }, [el('span', { class: 'k' }, 'Dashboard'), el('a', { class: 'v', href: s.dashboard, target: '_blank', rel: 'noopener', style: 'color:var(--accent)' }, 'Open')]));
+  host.appendChild(el('div', { class: 'status-line' }, [
+    el('span', { class: 'k' }, 'Configuration'),
+    el('span', { class: 'v' }, config.name || ('VoBiz config ' + (config.id || '')))
+  ]));
+  host.appendChild(el('div', { class: 'status-line' }, [
+    el('span', { class: 'k' }, 'Outbound workflow'),
+    el('span', { class: 'v' }, s.workflowId ? 'Workflow ' + s.workflowId : 'not configured')
+  ]));
+  if (s.dashboard) host.appendChild(el('div', { class: 'status-line' }, [
+    el('span', { class: 'k' }, 'Dograh'),
+    el('a', { class: 'v', href: s.dashboard, target: '_blank', rel: 'noopener', style: 'color:var(--accent)' }, 'Open console')
+  ]));
 
-  host.appendChild(el('div', { class: 'inbound-note' }, 'Inbound: calls to your numbers are answered by the assigned agent through the live engine. Configure routing per number in the dashboard.'));
+  host.appendChild(el('div', { class: 'inbound-note' }, 'Outbound calls are initiated by Dograh using the active VoBiz configuration. Inbound calls follow the workflow assigned to each VoBiz number.'));
 }
 
 function dialForm() {
@@ -1301,12 +1900,12 @@ function dialForm() {
   const btn = el('button', { class: 'btn btn-primary' }, 'Place call');
   const form = el('form', { class: 'dial-form', onsubmit: (e) => { e.preventDefault(); onDial(numI, btn); } }, [
     el('h3', { class: 't-h3' }, 'Outbound call'),
-    el('p', { class: 'muted', style: 'font-size:.85rem' }, 'Enter a 10 digit Indian mobile number. We dial through your live engine.'),
+    el('p', { class: 'muted', style: 'font-size:.85rem' }, 'Enter a 10 digit Indian mobile number. Dograh dials it through your VoBiz number.'),
     el('div', { class: 'field' }, [
       el('label', {}, 'Number'),
       el('div', { class: 'dial-input-row' }, [el('span', { class: 'prefix' }, '+91'), numI])
     ]),
-    el('div', { class: 'cost-warn' }, ['This places a ', el('b', {}, 'real paid call'), ' at about Rs 0.50 per minute.']),
+    el('div', { class: 'cost-warn' }, ['This places a ', el('b', {}, 'real paid VoBiz call'), ' and charges your telephony account.']),
     btn
   ]);
   return form;
@@ -1322,7 +1921,7 @@ function onDial(numI, btn) {
       el('p', {}, ['You are about to place a real outbound call to ', el('b', {}, '+91 ' + num), '.']),
       el('div', { class: 'danger-note' }, [
         el('b', {}, 'This is a live, paid call. '),
-        document.createTextNode('It connects through your telephony engine and bills your wallet at about Rs 0.50 per minute. Only continue if you intend to ring this number now.')
+        document.createTextNode('Dograh will initiate it through your VoBiz configuration and charge your telephony account. Only continue if you intend to ring this number now.')
       ])
     ]),
     confirmText: 'Yes, place the call', confirmKind: 'danger',
@@ -1333,7 +1932,7 @@ function onDial(numI, btn) {
         toast('Call placed to +91 ' + num + '.', 'ok');
         State.loaded.telephony = false; // refresh wallet next view
       } catch (ex) {
-        if (ex.status === 400 && ex.data && ex.data.error === 'needs_confirm') toast('Confirmation required. Please retry.', 'err');
+        if (ex.status === 400 && ex.data && ex.data.code === 'needs_confirm') toast('Confirmation required. Please retry.', 'err');
         else toast(ex.message || 'Dial failed.', 'err');
         throw ex;
       } finally {
@@ -1344,7 +1943,227 @@ function onDial(numI, btn) {
 }
 
 /* ===========================================================================
-   6. SETTINGS
+   6. PRESETS, BILLING, SUPPORT, AND SUPER ADMIN
+   =========================================================================== */
+async function viewPresets(root) {
+  root.appendChild(viewHead('Agent presets', 'Start with a production-minded intake flow, then customize the voice, instructions, calendar, and your own number.'));
+  const notice = el('div', { class: 'inbound-note', style: 'margin:0 0 18px' }, 'Presets are starting points. Personal Injury does not provide legal advice, and Dental does not diagnose. Review the workflow and consent language before using it live.');
+  const host = el('div', { class: 'preset-grid' }, skeleton('sk-card', 6));
+  root.appendChild(notice); root.appendChild(host);
+  try {
+    const out = await api('/api/presets');
+    State.presets = out.presets || [];
+    host.innerHTML = '';
+    State.presets.forEach((p) => {
+      const privacy = p.recommendedPrivacyMode || p.privacyMode || 'standard';
+      host.appendChild(el('article', { class: 'card preset-card' }, [
+        el('div', { class: 'preset-icon' }, (p.name || '?').slice(0, 1)),
+        el('div', { class: 'flex items-center justify-between gap-2' }, [
+          el('h3', { class: 't-h3' }, p.name),
+          el('span', { class: 'badge-ready' }, privacy.replace(/_/g, ' '))
+        ]),
+        el('p', { class: 'muted' }, p.description || 'Editable voice-agent starting point.'),
+        el('div', { class: 'preset-meta' }, [
+          el('span', {}, p.category || 'Voice agent'),
+          el('span', {}, 'BYON ready')
+        ]),
+        el('button', { class: 'btn btn-primary', onclick: () => createFromPreset(p) }, 'Use this preset')
+      ]));
+    });
+    if (!State.presets.length) host.appendChild(el('div', { class: 'empty muted' }, 'No presets are available.'));
+  } catch (e) { host.innerHTML = ''; host.appendChild(el('div', { class: 'card card-pad muted' }, e.message)); }
+}
+
+function createFromPreset(preset) {
+  modal({
+    title: 'Create ' + preset.name,
+    body: el('div', {}, [
+      el('p', {}, 'This creates an editable agent in your workspace. No phone number is attached until you connect your own number.'),
+      field('Agent name', el('input', { class: 'input', id: 'preset_agent_name', value: preset.name }))
+    ]),
+    confirmText: 'Create agent',
+    onConfirm: async () => {
+      const name = ($('#preset_agent_name').value || preset.name).trim();
+      await api('/api/agents', { method: 'POST', body: { presetId: preset.id, name: name } });
+      State.loaded.agents = false;
+      toast(name + ' created.', 'ok');
+      goto('agents');
+    }
+  });
+}
+
+async function viewBilling(root) {
+  root.appendChild(viewHead('Billing', 'Prepaid INR wallet, immutable transaction history, and secure PayU checkout.'));
+  const host = el('div', { class: 'grid grid-12' }, [
+    el('section', { class: 'card card-pad', id: 'walletSummary' }, skeleton('sk-card', 1)),
+    el('section', { class: 'card card-pad', id: 'walletLedger' }, skeleton('sk-card', 1))
+  ]);
+  root.appendChild(host);
+  try {
+    const out = await api('/api/wallet');
+    const wallet = out.wallet || {}; const rows = out.ledger || [];
+    const sum = $('#walletSummary'); sum.innerHTML = '';
+    sum.appendChild(el('div', { class: 'muted' }, 'Available credit'));
+    sum.appendChild(el('div', { class: 'wallet-big' }, ['₹' + fmtInr(wallet.balanceInr != null ? wallet.balanceInr : (wallet.balancePaise || 0) / 100), el('small', {}, ' INR') ]));
+    sum.appendChild(el('p', { class: 'muted' }, 'New accounts receive a one-time ₹10 trial credit. Voice and carrier usage are deducted separately according to the live rate card.'));
+    const packs = [{ id: 'starter', inr: 200 }, { id: 'growth', inr: 500 }, { id: 'scale', inr: 1000 }];
+    sum.appendChild(el('div', { class: 'pack-row' }, packs.map((pack) => el('button', { class: 'btn btn-ghost', onclick: () => startRecharge(pack.id) }, 'Add ₹' + fmtInr(pack.inr)))));
+    const ledger = $('#walletLedger'); ledger.innerHTML = '';
+    ledger.appendChild(el('h3', { class: 't-h3', style: 'margin-bottom:14px' }, 'Transaction history'));
+    rows.slice(0, 20).forEach((x) => ledger.appendChild(el('div', { class: 'ledger-row' }, [
+      el('div', {}, [el('div', {}, x.description || String(x.type || '').replace(/_/g, ' ')), el('small', { class: 'muted' }, x.createdAt || '')]),
+      el('b', { class: Number(x.amountPaise) >= 0 ? 'money-plus' : 'money-minus' }, (Number(x.amountPaise) >= 0 ? '+' : '') + '₹' + fmtInr(Number(x.amountPaise || 0) / 100))
+    ])));
+    if (!rows.length) ledger.appendChild(el('div', { class: 'muted' }, 'No wallet activity yet.'));
+  } catch (e) { host.innerHTML = ''; host.appendChild(el('div', { class: 'card card-pad muted' }, e.message)); }
+}
+
+async function startRecharge(packId) {
+  try {
+    const out = await api('/api/payment-intents', { method: 'POST', body: { packId: packId } });
+    const checkoutUrl = out.checkout && (out.checkout.action || out.checkout.url);
+    if (checkoutUrl && out.checkout.fields) {
+      const form = el('form', { method: 'POST', action: checkoutUrl });
+      Object.keys(out.checkout.fields).forEach((k) => form.appendChild(el('input', { type: 'hidden', name: k, value: out.checkout.fields[k] })));
+      document.body.appendChild(form); form.submit(); return;
+    }
+    toast(out.message || 'PayU checkout is not enabled yet. Your wallet was not charged.', 'info');
+  } catch (e) { toast(e.message, 'err'); }
+}
+
+async function viewSupport(root) {
+  root.appendChild(viewHead('Support', 'Open a ticket and keep every reply attached to your workspace.'));
+  const subject = el('input', { class: 'input', placeholder: 'What do you need help with.' });
+  const message = el('textarea', { class: 'input textarea', placeholder: 'Describe the issue, expected result, and what happened.' });
+  const create = el('button', { class: 'btn btn-primary' }, 'Open ticket');
+  const list = el('div', { class: 'ticket-list' }, skeleton('sk-card', 2));
+  create.onclick = async () => {
+    create.disabled = true;
+    try {
+      await api('/api/support/tickets', { method: 'POST', body: { subject: subject.value.trim(), message: message.value.trim(), priority: 'normal' } });
+      subject.value = ''; message.value = ''; toast('Support ticket opened.', 'ok'); await loadTickets(list);
+    } catch (e) { toast(e.message, 'err'); } finally { create.disabled = false; }
+  };
+  root.appendChild(el('div', { class: 'support-layout' }, [
+    el('section', { class: 'card card-pad support-compose' }, [el('h3', { class: 't-h3' }, 'New ticket'), field('Subject', subject), field('Message', message), create]),
+    list
+  ]));
+  await loadTickets(list);
+}
+
+async function loadTickets(host) {
+  try {
+    const out = await api('/api/support/tickets'); host.innerHTML = '';
+    (out.tickets || []).forEach((t) => host.appendChild(ticketCard(t, false)));
+    if (!(out.tickets || []).length) host.appendChild(el('div', { class: 'card card-pad muted' }, 'No support tickets yet.'));
+  } catch (e) { host.innerHTML = ''; host.appendChild(el('div', { class: 'card card-pad muted' }, e.message)); }
+}
+
+function ticketCard(t, admin) {
+  const messages = (t.messages || []).map((m) => el('div', { class: 'ticket-message' }, [
+    el('b', {}, m.authorName || m.authorRole || 'User'), el('span', {}, m.message || m.body || '')
+  ]));
+  const reply = el('input', { class: 'input', placeholder: 'Write a reply.' });
+  const send = el('button', { class: 'btn btn-ghost' }, 'Reply');
+  send.onclick = async () => {
+    const msg = reply.value.trim(); if (!msg) return;
+    send.disabled = true;
+    try {
+      await api(admin ? '/api/admin/tickets/reply' : '/api/support/tickets/reply', { method: 'POST', body: { ticketId: t.id, message: msg } });
+      toast('Reply sent.', 'ok'); onRoute();
+    } catch (e) { toast(e.message, 'err'); } finally { send.disabled = false; }
+  };
+  const adminControls = admin ? el('div', { class: 'ticket-admin-controls' }, [
+    (function () { const s = el('select', { class: 'select' }, ['open','in_progress','waiting_on_customer','resolved','closed'].map((v) => el('option', { value: v }, v.replace(/_/g, ' ')))); s.value = t.status || 'open'; s.setAttribute('data-ticket-status', t.id); return s; })(),
+    (function () { const s = el('select', { class: 'select' }, ['low','normal','high','urgent'].map((v) => el('option', { value: v }, v))); s.value = t.priority || 'normal'; s.setAttribute('data-ticket-priority', t.id); return s; })(),
+    el('button', { class: 'btn btn-ghost', onclick: async () => { const status = document.querySelector('[data-ticket-status="' + t.id + '"]').value; const priority = document.querySelector('[data-ticket-priority="' + t.id + '"]').value; await api('/api/admin/tickets/update', { method: 'POST', body: { ticketId: t.id, status: status, priority: priority } }); toast('Ticket updated.', 'ok'); onRoute(); } }, 'Update')
+  ]) : null;
+  return el('article', { class: 'card ticket-card' }, [
+    el('div', { class: 'flex items-center justify-between gap-2' }, [el('h3', { class: 't-h3' }, t.subject), el('span', { class: 'pill' }, t.status || 'open')]),
+    adminControls, ...messages, el('div', { class: 'ticket-reply' }, [reply, send])
+  ]);
+}
+
+async function viewAdmin(root) {
+  if (!State.me || !['super_admin', 'admin'].includes(State.me.user.role)) { goto('overview'); return; }
+  const superAdmin = State.me.user.role === 'super_admin';
+  root.appendChild(viewHead(superAdmin ? 'Super admin' : 'Operations admin', 'Users, workspaces, phone numbers, calls, billing, support, and immutable audit history.'));
+  const stats = el('div', { class: 'grid grid-3' }, skeleton('sk-stat', 5));
+  const tenantHost = el('div', { class: 'card card-pad admin-table' }, skeleton('sk-card', 1));
+  const ticketHost = el('div', { class: 'ticket-list' }, skeleton('sk-card', 2));
+  const eventHost = el('div', { class: 'card card-pad admin-table' }, skeleton('sk-card', 1));
+  root.appendChild(stats); root.appendChild(el('div', { class: 'admin-layout' }, [tenantHost, ticketHost])); root.appendChild(eventHost);
+  try {
+    const calls = [api('/api/admin/tickets'), api('/api/admin/payment-events')];
+    if (superAdmin) calls.unshift(api('/api/admin/overview'), api('/api/admin/tenants'), api('/api/admin/users'));
+    const data = await Promise.all(calls);
+    const o = superAdmin ? data[0] : { totals: {} }, ts = superAdmin ? data[1] : { tenants: [] }, users = superAdmin ? data[2] : { users: [] }, tickets = data[superAdmin ? 3 : 0], events = data[superAdmin ? 4 : 1];
+    stats.innerHTML = '';
+    const totals = o.totals || {};
+    [['Tenants', totals.tenants || 'Restricted'], ['Users', totals.users || 'Restricted'], ['Open tickets', totals.openTickets != null ? totals.openTickets : (tickets.tickets || []).filter((t) => t.status !== 'closed').length], ['Wallet total', superAdmin ? '₹' + fmtInr((totals.walletPaise || 0) / 100) : 'Restricted'], ['Calls', superAdmin ? totals.calls : 'Restricted']].forEach((x) => stats.appendChild(statCard(x[0], String(x[1] || 0), 'All workspaces')));
+    tenantHost.innerHTML = ''; tenantHost.appendChild(el('h3', { class: 't-h3' }, 'Tenants'));
+    if (superAdmin) (ts.tenants || []).forEach((t) => tenantHost.appendChild(adminTenantRow(t, (users.users || []).filter((u) => u.tenantId === t.id))));
+    else tenantHost.appendChild(el('div', { class: 'muted' }, 'Tenant controls require super admin access.'));
+    ticketHost.innerHTML = ''; (tickets.tickets || []).forEach((t) => ticketHost.appendChild(ticketCard(t, true)));
+    eventHost.innerHTML = ''; eventHost.appendChild(el('h3', { class: 't-h3' }, 'PayU webhook log'));
+    (events.events || []).slice(0, 25).forEach((e) => eventHost.appendChild(el('div', { class: 'admin-row' }, [el('div', {}, [el('b', {}, e.txnid || 'Unknown transaction'), el('small', { class: 'muted' }, (e.reason || '') + ' · ' + (e.createdAt || ''))]), el('span', { class: 'pill' }, e.status || 'received')])));
+    if (!(events.events || []).length) eventHost.appendChild(el('div', { class: 'muted' }, 'No PayU webhooks received yet.'));
+  } catch (e) { tenantHost.innerHTML = ''; tenantHost.appendChild(el('div', { class: 'muted' }, e.message)); }
+}
+
+function adminTenantRow(t, users) {
+  const wallet = t.wallet || {};
+  const toggle = el('button', { class: 'btn btn-ghost' }, t.status === 'suspended' ? 'Reactivate' : 'Suspend');
+  toggle.onclick = async () => {
+    const status = t.status === 'suspended' ? 'active' : 'suspended';
+    await api('/api/admin/tenants/status', { method: 'POST', body: { tenantId: t.id, status: status } });
+    toast('Tenant set to ' + status + '.', 'ok'); onRoute();
+  };
+  const credit = el('button', { class: 'btn btn-ghost', onclick: () => adjustWallet(t) }, 'Adjust credit');
+  const inspect = el('button', { class: 'btn btn-primary', onclick: () => inspectTenant(t, users || []) }, 'Open workspace');
+  return el('div', { class: 'admin-row' }, [
+    el('div', {}, [el('b', {}, t.name), el('small', { class: 'muted' }, (t.users || 0) + ' users, ₹' + fmtInr((wallet.balancePaise || 0) / 100))]),
+    el('span', { class: 'pill' }, t.status || 'active'), el('div', { class: 'flex gap-2' }, [inspect, credit, toggle])
+  ]);
+}
+
+async function inspectTenant(t, users) {
+  const out = await api('/api/admin/tenant-detail?tenantId=' + encodeURIComponent(t.id));
+  const tabs = [
+    ['Users', (out.users || []).map((u) => u.name + ' · ' + u.email + ' · ' + u.role)],
+    ['Agents', (out.agents || []).map((a) => a.name + ' · ' + ((a.telephony || {}).did || 'No number'))],
+    ['Numbers', (out.numbers || []).map((n) => n.address + ' · ' + n.provider + ' · ' + n.status)],
+    ['Calls', (out.usage || []).map((u) => u.day + ' · ' + (u.calls || 0) + ' calls')],
+    ['Billing', (out.ledger || []).map((x) => (x.type || 'entry') + ' · ₹' + fmtInr((x.amountPaise || 0) / 100))],
+    ['Support', (out.tickets || []).map((x) => x.subject + ' · ' + x.status)]
+  ];
+  const body = el('div', { class: 'tenant-inspector' }, tabs.map((tab) => el('section', {}, [el('h4', {}, tab[0]), ...(tab[1].length ? tab[1].map((line) => el('div', { class: 'inspector-line' }, line)) : [el('div', { class: 'muted' }, 'No records')])])));
+  const user = (out.users || []).find((u) => u.role !== 'super_admin' && u.status === 'active');
+  if (user) body.prepend(el('button', { class: 'btn btn-dark', onclick: () => startImpersonation(user) }, 'View as ' + user.email));
+  modal({ title: out.tenant.name, body: body, confirmText: 'Close', onConfirm: async () => {} });
+}
+
+function startImpersonation(user) {
+  const reason = el('input', { class: 'input', placeholder: 'Support ticket or investigation reason' });
+  const password = el('input', { class: 'input', type: 'password', placeholder: 'Your super admin password' });
+  modal({ title: 'View as ' + user.email, body: el('div', {}, [el('p', {}, 'This creates a 30 minute read-only user session. Billing, roles, status, and secrets remain blocked.'), field('Reason', reason), field('Re-enter your password', password)]), confirmText: 'Enter user view', onConfirm: async () => {
+    await api('/api/admin/impersonations', { method: 'POST', body: { userId: user.id, reason: reason.value.trim(), password: password.value } });
+    State.me = await api('/api/me'); renderShell(); goto('overview');
+  }});
+}
+
+function adjustWallet(t) {
+  const amount = el('input', { class: 'input', type: 'number', step: '0.01', placeholder: '100.00' });
+  const reason = el('input', { class: 'input', placeholder: 'Required adjustment reason' });
+  modal({ title: 'Adjust ' + t.name + ' wallet', body: el('div', {}, [field('Amount in INR, negative deducts', amount), field('Reason', reason)]), confirmText: 'Apply adjustment', onConfirm: async () => {
+    const paise = Math.round(Number(amount.value) * 100);
+    await api('/api/admin/wallet/adjust', { method: 'POST', body: { tenantId: t.id, amountPaise: paise, reason: reason.value.trim(), idempotencyKey: 'ui_' + Date.now() + '_' + Math.random().toString(36).slice(2) } });
+    toast('Wallet adjusted.', 'ok'); onRoute();
+  }});
+}
+
+/* ===========================================================================
+   7. SETTINGS
    =========================================================================== */
 async function viewSettings(root) {
   root.appendChild(viewHead('Settings', 'Active and ready-to-wire providers, plus your tenant identity. Swap any layer without touching the rest.'));
@@ -1387,6 +2206,44 @@ async function viewSettings(root) {
     ])
   ]));
 
+  const privacySelect = el('select', { class: 'select', id: 'privacy_mode' }, [
+    el('option', { value: 'standard' }, 'Standard retention'),
+    el('option', { value: 'metadata_only' }, 'Privacy mode, metadata only'),
+    el('option', { value: 'no_recording' }, 'HIPAA mode, no recording or transcript retention')
+  ]);
+  const privacySave = el('button', { class: 'btn btn-primary' }, 'Save privacy mode');
+  privacySave.onclick = async () => {
+    privacySave.disabled = true;
+    try { await api('/api/privacy', { method: 'POST', body: { mode: privacySelect.value } }); toast('Privacy mode saved.', 'ok'); }
+    catch (e) { toast(e.message, 'err'); } finally { privacySave.disabled = false; }
+  };
+  const provider = el('select', { class: 'select' }, [el('option', { value: 'vobiz' }, 'VoBiz'), el('option', { value: 'telnyx' }, 'Telnyx'), el('option', { value: 'sip' }, 'SIP trunk')]);
+  const address = el('input', { class: 'input', placeholder: 'Verified E.164 number or SIP address' });
+  const label = el('input', { class: 'input', placeholder: 'Main sales line' });
+  const byonList = el('div', { class: 'byon-list muted' }, 'Loading connections...');
+  const byonSave = el('button', { class: 'btn btn-ghost' }, 'Connect my number');
+  byonSave.onclick = async () => {
+    byonSave.disabled = true;
+    try { await api('/api/byon', { method: 'POST', body: { provider: provider.value, address: address.value.trim(), label: label.value.trim() } }); toast('Number connection saved for verification.', 'ok'); await loadByon(byonList); }
+    catch (e) { toast(e.message, 'err'); } finally { byonSave.disabled = false; }
+  };
+  root.appendChild(el('div', { class: 'settings-split' }, [
+    el('section', { class: 'card card-pad' }, [
+      el('h3', { class: 't-h3' }, 'Privacy and HIPAA mode'),
+      el('p', { class: 'muted privacy-copy' }, 'HIPAA mode disables recording and transcript retention in RapidX Voice. It does not by itself make your organization HIPAA compliant. You still need appropriate provider BAAs, policies, access controls, consent, and legal review.'),
+      field('Retention policy', privacySelect), privacySave
+    ]),
+    el('section', { class: 'card card-pad' }, [
+      el('h3', { class: 't-h3' }, 'Bring your own number'),
+      el('p', { class: 'muted privacy-copy' }, 'Connect only a number or SIP address that your organization owns and has verified with the carrier.'),
+      field('Provider', provider), field('Number or SIP address', address), field('Label', label), byonSave, byonList
+    ])
+  ]));
+  Promise.all([
+    api('/api/privacy').then((x) => { privacySelect.value = x.mode || 'standard'; }),
+    loadByon(byonList)
+  ]).catch(() => {});
+
   try {
     const reg = await ensureProviders();
     paintProviders(provHost, reg);
@@ -1394,6 +2251,14 @@ async function viewSettings(root) {
     provHost.innerHTML = '';
     provHost.appendChild(el('div', { class: 'card card-pad muted' }, 'Could not load providers. ' + esc(e.message)));
   }
+}
+
+async function loadByon(host) {
+  const out = await api('/api/byon'); host.innerHTML = '';
+  (out.connections || []).forEach((x) => host.appendChild(el('div', { class: 'status-line' }, [
+    el('span', { class: 'k' }, x.label || x.provider), el('span', { class: 'v' }, (x.address || '') + ' · ' + (x.status || 'pending'))
+  ])));
+  if (!(out.connections || []).length) host.textContent = 'No number connected yet.';
 }
 
 function paintProviders(host, reg) {
