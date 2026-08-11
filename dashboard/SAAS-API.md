@@ -44,6 +44,15 @@ All endpoints use the existing `rxv_sess` HttpOnly cookie. Every customer resour
 - `POST /api/hvac/jobs` creates or updates a tenant-scoped call outcome.
 - `POST /api/hvac/book` creates a Cal.com booking and records the booked outcome for the tenant.
 
+## Agency operations
+
+- `GET /api/agency/overview` returns invoice-backed revenue, receivables, client activity, lifecycle distribution, and a 30-day chart series. Wallet credit is excluded from revenue.
+- `GET|POST /api/agency/prompt` reads or stores one versioned operating prompt for the current tenant. It does not authorize external actions.
+- `GET|POST /api/invoices` lists scoped invoices or creates a draft or issued invoice. Creating an issued record does not send email.
+- `POST /api/invoices/status` moves a non-final invoice to `issued`, `paid`, or `void`. Paid and void records are final.
+- `GET /api/integrations` reports truthful setup state for WhatsApp Business Cloud and Meta Ad Library.
+- `POST /api/integrations/request` records an internal setup request. It does not call Meta or connect an external service.
+
 ## Provider and model contract
 
 - `GET /api/providers` reports implemented STT, TTS, LLM, and telephony adapters. Each row contains the provider ID, label, selected state, configured state in `live`, model ID where applicable, and the names of required environment variables. Secret values are never returned.
@@ -70,10 +79,12 @@ Dograh's published workflow remains the runtime authority for phone and browser 
 - `POST /api/admin/users/role` with `{userId,role}` accepts `super_admin`, `admin`, `owner`, or `member`. Super admin required and self-demotion is rejected.
 - `POST /api/admin/wallet/adjust` with `{tenantId,amountPaise,idempotencyKey,reason}` returns `{ledgerEntry}`. Replays return `{duplicate:true}` and never apply twice. Admin required.
 - `POST /api/admin/tickets/reply` with `{ticketId,message,internal,status}` returns `{message}`. Admin required.
+- `POST /api/admin/tenants` creates a client workspace and an optional owner. It never sends an invitation. Super admin required.
+- `POST /api/admin/client-approach` records a WhatsApp, email, phone, LinkedIn, meeting, or other client touchpoint. Admin required.
 
 ## Persistence collections
 
-Schema version 3 includes `wallets`, `ledger`, `paymentIntents`, `supportTickets`, `supportMessages`, `auditEvents`, `presets`, `byonConnections`, `hvacJobs`, `hvacSettings`, `paymentEvents`, and `demoLinks`. Startup migration is additive. Existing agents, usage, tenants, users, and sessions remain valid. New session and demo-link tokens are stored as SHA-256 hashes; legacy sessions continue to resolve during migration.
+Schema version 4 includes `wallets`, `ledger`, `paymentIntents`, `supportTickets`, `supportMessages`, `auditEvents`, `presets`, `byonConnections`, `hvacJobs`, `hvacSettings`, `paymentEvents`, `demoLinks`, `invoices`, `invoiceEvents`, `integrationRequests`, `agencyPrompts`, `clientActivities`, and `tenantStatusEvents`. Startup migration is additive. Existing agents, usage, tenants, users, and sessions remain valid. New session and demo-link tokens are stored as SHA-256 hashes; legacy sessions continue to resolve during migration.
 
 The JSON store remains suitable for a single-process demo. Production must move these contracts to transactional PostgreSQL before accepting money. PayU success redirects must never credit a wallet. Only a verified, idempotent server callback may convert a payment intent into a ledger credit.
 

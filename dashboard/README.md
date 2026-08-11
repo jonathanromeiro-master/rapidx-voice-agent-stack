@@ -6,13 +6,14 @@
 
 **Production AI voice agents at roughly one rupee.** A premium, multi-tenant, provider-agnostic voice agent platform. Powered by Rumik silk TTS, about 20x cheaper than ElevenLabs, with a swappable engine so you are never locked into one TTS, LLM, or telephony vendor.
 
-It runs in **one folder with one small WebSocket dependency**. No build step, no bundler, no framework, no CDN. Copy the folder to any machine with Node 18 or newer and it just runs, fully offline for everything except the upstream provider calls.
+It runs from one Node service. The product shell is dependency-free browser JavaScript, while the agency analytics island is compiled from React and Recharts into a self-hosted bundle. No CDN runtime is required.
 
 ## Quick start (3 commands)
 
 ```sh
 cp .env.example .env     # then fill in your keys (see below)
-pnpm install             # installs the WebSocket relay dependency
+pnpm install             # installs runtime and build dependencies
+pnpm build               # compiles the Recharts analytics island
 sh setup.sh              # checks Node, creates data/, prints next steps
 node server.js           # serves the site and API on http://localhost:8787
 ```
@@ -62,6 +63,11 @@ The whole pitch is the price. Rumik silk bills per character at promo rates that
 ## What you can do in the console
 
 - **Overview** with live provider health, usage, and quick actions.
+- **Agency overview** with invoice-backed revenue, outstanding receivables, client activity, lifecycle distribution, and Recharts visualizations for platform roles.
+- **Clients** with lifecycle status, activity logs, wallet visibility, outstanding invoices, and explicit approach records.
+- **Invoices** with tenant-scoped draft, issue, paid, overdue, and void states. Stored issue status does not claim that an email was sent.
+- **Integrations** with truthful setup request states for WhatsApp Business Cloud and the Meta Ad Library API. No external connection is claimed until credentials and a live adapter exist.
+- **Agency prompt** with a versioned, persistent operating instruction. It does not authorize messages, calls, payments, or other external actions.
 - **Agents**: build an agent (persona, voice model, speaker, pitch, greeting, assigned phone number) and preview its real voice in one click.
 - **Voice Studio**: type text, pick a model and voice, synthesize a real WAV, see the character count and cost.
 - **Talk to it**: a direct browser voice call through Dograh SmallWebRTC, using the same published workflow and latency path as telephony. The Studio does not render transcript text in this mode.

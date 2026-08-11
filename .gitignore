@@ -6,6 +6,7 @@ node_modules/
 .DS_Store
 *.pem
 *.key
+/work/
 
 # Local runtime checkouts and generated compose state. The verified Rumik
 # overlay source in rumik-overlay-local/ remains intentionally trackable.

@@ -14,6 +14,7 @@
 'use strict';
 
 const http = require('http');
+const net = require('net');
 const fs = require('fs');
 const path = require('path');
 const { WebSocketServer, WebSocket } = require('ws');
@@ -948,6 +949,307 @@ function apiAudit(req, res, ctx) {
   core.sendJson(res, 200, { auditEvents: core.db().auditEvents.filter((e) => e.tenantId === ctx.tenant.id).slice(-200).reverse() });
 }
 
+const INVOICE_STATUSES = new Set(['draft', 'issued', 'paid', 'void']);
+const APPROACH_CHANNELS = new Set(['whatsapp', 'email', 'phone', 'linkedin', 'meeting', 'other']);
+const INTEGRATION_CATALOG = [
+  {
+    id: 'whatsapp-business',
+    name: 'WhatsApp Business Cloud',
+    category: 'Messaging',
+    description: 'Manage consent-safe conversations, templates, delivery state, and client replies from one workspace.',
+    capabilities: ['Shared inbox', 'Approved templates', 'Delivery events', 'Conversation activity'],
+    setup: ['Meta business verification', 'WhatsApp phone number', 'Access token', 'Signed webhook'],
+  },
+  {
+    id: 'meta-ad-library',
+    name: 'Meta Ad Library',
+    category: 'Research',
+    description: 'Track public competitor ads and save research context without presenting sample records as live campaign data.',
+    capabilities: ['Public ad search', 'Competitor watchlists', 'Creative snapshots', 'Research notes'],
+    setup: ['Meta developer app', 'Permitted API access', 'Rate-limit policy', 'Health check'],
+  },
+];
+
+function isPlatformUser(user) {
+  return user && (user.role === 'super_admin' || user.role === 'admin');
+}
+
+function requestOriginAllowed(req) {
+  const rawOrigin = String(req.headers.origin || '').trim();
+  if (!rawOrigin) return true;
+  let origin;
+  try { origin = new URL(rawOrigin); } catch (_) { return false; }
+  if (!['http:', 'https:'].includes(origin.protocol)) return false;
+  const forwardedHost = String(req.headers['x-forwarded-host'] || '').split(',')[0].trim();
+  const requestHost = forwardedHost || String(req.headers.host || '').trim();
+  const configuredOrigin = String(process.env.PUBLIC_ORIGIN || '').trim().replace(/\/$/, '');
+  if (configuredOrigin) return rawOrigin === configuredOrigin;
+  const forwardedProto = String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim();
+  const requestProto = forwardedProto || (req.socket.encrypted ? 'https' : 'http');
+  return !!requestHost && origin.origin === `${requestProto}://${requestHost}`;
+}
+
+function requestRateKey(req) {
+  const peer = String(req.socket.remoteAddress || 'local').replace(/^::ffff:/, '');
+  if (process.env.TRUST_PROXY !== '1') return peer;
+  const privatePeer = peer === '127.0.0.1' || peer === '::1' || peer.startsWith('10.') || peer.startsWith('192.168.') || /^172\.(1[6-9]|2\d|3[01])\./.test(peer);
+  if (!privatePeer) return peer;
+  const forwarded = String(req.headers['x-forwarded-for'] || '').split(',')[0].trim();
+  return net.isIP(forwarded) ? forwarded : peer;
+}
+
+function invoiceState(invoice, now = Date.now()) {
+  if (invoice.status === 'issued' && invoice.dueDate && new Date(`${invoice.dueDate}T23:59:59Z`).getTime() < now) return 'overdue';
+  return invoice.status;
+}
+
+function validDateOnly(value) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const parsed = new Date(`${value}T00:00:00Z`);
+  return Number.isFinite(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
+}
+
+function publicInvoice(invoice) {
+  return {
+    id: invoice.id,
+    tenantId: invoice.tenantId,
+    invoiceNumber: invoice.invoiceNumber,
+    clientName: invoice.clientName,
+    clientEmail: invoice.clientEmail || '',
+    description: invoice.description,
+    amountPaise: invoice.amountPaise,
+    currency: invoice.currency || 'INR',
+    issueDate: invoice.issueDate,
+    dueDate: invoice.dueDate,
+    status: invoiceState(invoice),
+    storedStatus: invoice.status,
+    deliveryStatus: invoice.deliveryStatus || 'not_sent',
+    createdAt: invoice.createdAt,
+    updatedAt: invoice.updatedAt,
+    issuedAt: invoice.issuedAt || null,
+    paidAt: invoice.paidAt || null,
+  };
+}
+
+function scopedInvoices(ctx) {
+  const rows = core.db().invoices || [];
+  return (isPlatformUser(ctx.user) ? rows : rows.filter((row) => row.tenantId === ctx.tenant.id));
+}
+
+function apiInvoices(req, res, ctx) {
+  core.sendJson(res, 200, { invoices: scopedInvoices(ctx).slice().sort((a, b) => b.createdAt.localeCompare(a.createdAt)).map(publicInvoice) });
+}
+
+async function apiInvoiceCreate(req, res, ctx) {
+  if (rejectImpersonated(res, ctx)) return;
+  const b = ctx.body || {};
+  const d = core.db();
+  const requestedTenantId = String(b.tenantId || '');
+  const tenant = isPlatformUser(ctx.user)
+    ? d.tenants.find((row) => row.id === requestedTenantId)
+    : d.tenants.find((row) => row.id === ctx.tenant.id);
+  if (!tenant) return core.sendJson(res, 422, { error: 'valid client workspace required', code: 'bad_tenant' });
+  const amountPaise = Number(b.amountPaise);
+  const description = String(b.description || '').trim().slice(0, 500);
+  const clientName = String(b.clientName || tenant.name || '').trim().slice(0, 120);
+  const clientEmail = String(b.clientEmail || '').trim().toLowerCase().slice(0, 160);
+  const dueDate = String(b.dueDate || '').trim();
+  const issueDate = String(b.issueDate || todayUtc()).trim();
+  const initialStatus = b.issueNow === true ? 'issued' : 'draft';
+  if (!Number.isInteger(amountPaise) || amountPaise < 100 || amountPaise > 1000000000) return core.sendJson(res, 422, { error: 'amount must be between ₹1 and ₹10,000,000', code: 'bad_amount' });
+  if (!description || !clientName) return core.sendJson(res, 422, { error: 'client name and description required', code: 'bad_invoice' });
+  if (clientEmail && !EMAIL_RE.test(clientEmail)) return core.sendJson(res, 422, { error: 'client email is invalid', code: 'bad_email' });
+  if (!validDateOnly(issueDate) || !validDateOnly(dueDate)) return core.sendJson(res, 422, { error: 'valid issue and due dates are required', code: 'bad_date' });
+  if (dueDate < issueDate) return core.sendJson(res, 422, { error: 'due date cannot be before issue date', code: 'bad_date' });
+  let invoice;
+  await core.mutate((store) => {
+    const year = issueDate.slice(0, 4);
+    const sequence = store.invoices.filter((row) => String(row.invoiceNumber || '').startsWith(`RX-${year}-`)).length + 1;
+    const now = new Date().toISOString();
+    invoice = {
+      id: core.genId('inv_'), tenantId: tenant.id, invoiceNumber: `RX-${year}-${String(sequence).padStart(4, '0')}`,
+      clientName, clientEmail, description, amountPaise, currency: 'INR', issueDate, dueDate,
+      status: initialStatus, deliveryStatus: 'not_sent', createdBy: ctx.user.id, createdAt: now, updatedAt: now,
+      issuedAt: initialStatus === 'issued' ? now : null,
+    };
+    store.invoices.push(invoice);
+    store.invoiceEvents.push({ id: core.genId('ine_'), tenantId: tenant.id, invoiceId: invoice.id, type: initialStatus === 'issued' ? 'issued' : 'created', actorUserId: ctx.user.id, createdAt: now });
+    store.clientActivities.push({ id: core.genId('act_'), tenantId: tenant.id, type: initialStatus === 'issued' ? 'invoice_issued' : 'invoice_created', channel: 'internal', visibility: 'internal', summary: `${invoice.invoiceNumber} ${initialStatus === 'issued' ? 'issued' : 'created'} for ₹${(amountPaise / 100).toLocaleString('en-IN')}.`, actorUserId: ctx.user.id, createdAt: now });
+    addAudit(store, ctx, initialStatus === 'issued' ? 'invoice.issued' : 'invoice.created', 'invoice', invoice.id, { invoiceNumber: invoice.invoiceNumber, tenantId: tenant.id, amountPaise });
+  });
+  core.sendJson(res, 201, { invoice: publicInvoice(invoice), note: 'The invoice is stored in Agency OS. No email was sent.' });
+}
+
+async function apiInvoiceStatus(req, res, ctx) {
+  if (rejectImpersonated(res, ctx)) return;
+  const b = ctx.body || {};
+  const requested = String(b.status || '');
+  if (!INVOICE_STATUSES.has(requested)) return core.sendJson(res, 422, { error: 'invalid invoice status', code: 'bad_status' });
+  const current = scopedInvoices(ctx).find((row) => row.id === String(b.invoiceId || ''));
+  if (!current) return core.sendJson(res, 404, { error: 'invoice not found', code: 'not_found' });
+  const transitions = { draft: new Set(['issued', 'void']), issued: new Set(['paid', 'void']), paid: new Set(), void: new Set() };
+  if (!transitions[current.status] || !transitions[current.status].has(requested)) {
+    const final = current.status === 'void' || current.status === 'paid';
+    return core.sendJson(res, 409, {
+      error: final ? 'paid and void invoices are final' : `invoice cannot move from ${current.status} to ${requested}`,
+      code: final ? 'invoice_final' : 'invalid_transition',
+    });
+  }
+  let updated;
+  await core.mutate((store) => {
+    const invoice = store.invoices.find((row) => row.id === current.id);
+    if (!invoice || !transitions[invoice.status] || !transitions[invoice.status].has(requested)) return;
+    const now = new Date().toISOString();
+    invoice.status = requested; invoice.updatedAt = now;
+    if (requested === 'issued' && !invoice.issuedAt) invoice.issuedAt = now;
+    if (requested === 'paid') invoice.paidAt = now;
+    if (requested === 'void') invoice.voidedAt = now;
+    store.invoiceEvents.push({ id: core.genId('ine_'), tenantId: invoice.tenantId, invoiceId: invoice.id, type: requested, actorUserId: ctx.user.id, createdAt: now });
+    store.clientActivities.push({ id: core.genId('act_'), tenantId: invoice.tenantId, type: `invoice_${requested}`, channel: 'internal', visibility: 'internal', summary: `${invoice.invoiceNumber} marked ${requested}.`, actorUserId: ctx.user.id, createdAt: now });
+    addAudit(store, ctx, `invoice.${requested}`, 'invoice', invoice.id, { invoiceNumber: invoice.invoiceNumber, tenantId: invoice.tenantId });
+    updated = { ...invoice };
+  });
+  if (!updated) return core.sendJson(res, 409, { error: 'invoice state changed before this update', code: 'invoice_conflict' });
+  core.sendJson(res, 200, { invoice: publicInvoice(updated) });
+}
+
+function apiAgencyOverview(req, res, ctx) {
+  const d = core.db();
+  const platform = isPlatformUser(ctx.user);
+  const tenantIds = platform ? new Set(d.tenants.map((t) => t.id)) : new Set([ctx.tenant.id]);
+  const tenants = d.tenants.filter((t) => tenantIds.has(t.id));
+  const invoices = d.invoices.filter((row) => tenantIds.has(row.tenantId));
+  const usage = d.usage.filter((row) => tenantIds.has(row.tenantId));
+  const activities = d.clientActivities.filter((row) => tenantIds.has(row.tenantId) && (platform || row.visibility === 'tenant'));
+  const audit = d.auditEvents.filter((row) => tenantIds.has(row.tenantId));
+  const days = [];
+  for (let i = 29; i >= 0; i--) {
+    const date = new Date(Date.now() - i * 86400000).toISOString().slice(0, 10);
+    const dayInvoices = invoices.filter((row) => row.issueDate === date && row.status !== 'draft' && row.status !== 'void');
+    const dayPaid = invoices.filter((row) => row.paidAt && row.paidAt.slice(0, 10) === date);
+    const dayUsage = usage.filter((row) => row.day === date);
+    const dayActivities = activities.filter((row) => row.createdAt.slice(0, 10) === date);
+    days.push({
+      date,
+      invoicedPaise: dayInvoices.reduce((sum, row) => sum + row.amountPaise, 0),
+      paidPaise: dayPaid.reduce((sum, row) => sum + row.amountPaise, 0),
+      calls: dayUsage.reduce((sum, row) => sum + Number(row.calls || 0), 0),
+      activity: dayActivities.length + audit.filter((row) => row.createdAt && row.createdAt.slice(0, 10) === date).length,
+    });
+  }
+  const issued = invoices.filter((row) => row.status === 'issued' || row.status === 'paid');
+  const paid = invoices.filter((row) => row.status === 'paid');
+  const outstanding = invoices.filter((row) => row.status === 'issued');
+  const comparisons = tenants.map((tenant) => ({
+    tenantId: tenant.id,
+    name: tenant.name,
+    status: tenant.status || 'active',
+    calls: usage.filter((row) => row.tenantId === tenant.id).reduce((sum, row) => sum + Number(row.calls || 0), 0),
+    activity: activities.filter((row) => row.tenantId === tenant.id).length + audit.filter((row) => row.tenantId === tenant.id).length,
+    outstandingPaise: outstanding.filter((row) => row.tenantId === tenant.id).reduce((sum, row) => sum + row.amountPaise, 0),
+  })).sort((a, b) => (b.calls + b.activity) - (a.calls + a.activity)).slice(0, 8);
+  const portfolio = ['active', 'onboarding', 'suspended', 'closed'].map((status) => ({ status, count: tenants.filter((t) => (t.status || 'active') === status).length }));
+  const recent = activities.slice().sort((a, b) => b.createdAt.localeCompare(a.createdAt)).slice(0, 12).map((row) => ({ id: row.id, tenantId: row.tenantId, tenantName: (d.tenants.find((t) => t.id === row.tenantId) || {}).name || 'Workspace', type: row.type, channel: row.channel, summary: row.summary, createdAt: row.createdAt }));
+  core.sendJson(res, 200, {
+    dataMode: 'live_staging', currency: 'INR', asOf: new Date().toISOString(),
+    kpis: {
+      clients: tenants.length,
+      activeClients: tenants.filter((t) => (t.status || 'active') === 'active').length,
+      closedClients: tenants.filter((t) => t.status === 'closed').length,
+      invoicedPaise: issued.reduce((sum, row) => sum + row.amountPaise, 0),
+      paidPaise: paid.reduce((sum, row) => sum + row.amountPaise, 0),
+      outstandingPaise: outstanding.reduce((sum, row) => sum + row.amountPaise, 0),
+      calls: usage.reduce((sum, row) => sum + Number(row.calls || 0), 0),
+      activity: activities.length + audit.length,
+    },
+    days, comparisons, portfolio, recent,
+  });
+}
+
+async function apiClientApproach(req, res, ctx) {
+  if (rejectImpersonated(res, ctx)) return;
+  if (!isPlatformUser(ctx.user)) return core.sendJson(res, 403, { error: 'platform admin required', code: 'forbidden' });
+  const b = ctx.body || {};
+  const tenant = core.db().tenants.find((row) => row.id === String(b.tenantId || ''));
+  const channel = String(b.channel || '').toLowerCase();
+  const summary = String(b.summary || '').trim().slice(0, 500);
+  if (!tenant || !APPROACH_CHANNELS.has(channel) || !summary) return core.sendJson(res, 422, { error: 'valid client, channel, and summary required', code: 'bad_activity' });
+  let activity;
+  await core.mutate((store) => {
+    const now = new Date().toISOString();
+    activity = { id: core.genId('act_'), tenantId: tenant.id, type: 'approach', channel, visibility: 'internal', summary, actorUserId: ctx.user.id, createdAt: now };
+    store.clientActivities.push(activity);
+    const target = store.tenants.find((row) => row.id === tenant.id); target.lastApproachedAt = now;
+    addAudit(store, ctx, 'client.approached', 'tenant', tenant.id, { channel });
+  });
+  core.sendJson(res, 201, { activity });
+}
+
+function apiIntegrations(req, res, ctx) {
+  const requests = core.db().integrationRequests.filter((row) => row.tenantId === ctx.tenant.id);
+  const integrations = INTEGRATION_CATALOG.map((item) => {
+    const request = requests.filter((row) => row.integrationId === item.id).sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0];
+    return { ...item, status: request ? request.status : 'setup_required', requestedAt: request ? request.createdAt : null };
+  });
+  core.sendJson(res, 200, { integrations, note: 'Setup requests do not connect external services.' });
+}
+
+async function apiIntegrationRequest(req, res, ctx) {
+  if (rejectImpersonated(res, ctx)) return;
+  const integrationId = String((ctx.body || {}).integrationId || '');
+  const item = INTEGRATION_CATALOG.find((row) => row.id === integrationId);
+  if (!item) return core.sendJson(res, 422, { error: 'unknown integration', code: 'bad_integration' });
+  let request;
+  await core.mutate((store) => {
+    const existing = store.integrationRequests.find((row) => row.tenantId === ctx.tenant.id && row.integrationId === integrationId && row.status === 'requested');
+    if (existing) { request = existing; return; }
+    request = { id: core.genId('int_'), tenantId: ctx.tenant.id, integrationId, status: 'requested', createdBy: ctx.user.id, createdAt: new Date().toISOString() };
+    store.integrationRequests.push(request);
+    addAudit(store, ctx, 'integration.setup_requested', 'integration', integrationId);
+  });
+  core.sendJson(res, 201, { request, note: 'Request recorded. The integration is not connected.' });
+}
+
+function apiAgencyPromptGet(req, res, ctx) {
+  const row = core.db().agencyPrompts.find((item) => item.tenantId === ctx.tenant.id);
+  const editor = row ? core.db().users.find((user) => user.id === row.updatedBy) : null;
+  core.sendJson(res, 200, { prompt: row ? row.text : '', version: row ? row.version : 0, updatedAt: row ? row.updatedAt : null, updatedBy: editor ? editor.name || editor.email : null });
+}
+
+async function apiAgencyPromptSave(req, res, ctx) {
+  if (rejectImpersonated(res, ctx)) return;
+  const text = String((ctx.body || {}).prompt || '').trim();
+  if (text.length < 20 || text.length > 12000) return core.sendJson(res, 422, { error: 'agency prompt must be between 20 and 12,000 characters', code: 'bad_prompt' });
+  let row;
+  await core.mutate((store) => {
+    const now = new Date().toISOString();
+    row = store.agencyPrompts.find((item) => item.tenantId === ctx.tenant.id);
+    if (!row) {
+      row = { tenantId: ctx.tenant.id, text, version: 1, updatedBy: ctx.user.id, updatedAt: now };
+      store.agencyPrompts.push(row);
+    } else {
+      row.text = text; row.version += 1; row.updatedBy = ctx.user.id; row.updatedAt = now;
+    }
+    addAudit(store, ctx, 'agency.prompt.updated', 'agency_prompt', ctx.tenant.id, { version: row.version });
+  });
+  core.sendJson(res, 200, { prompt: row.text, version: row.version, updatedAt: row.updatedAt, updatedBy: ctx.user.name || ctx.user.email });
+}
+
+async function apiTenantUpdate(req, res, ctx) {
+  if (rejectImpersonated(res, ctx)) return;
+  const b = ctx.body || {};
+  const name = String(b.name || '').trim().slice(0, 80);
+  const color = String(b.color || '').trim();
+  if (!name || !/^#[0-9a-fA-F]{6}$/.test(color)) return core.sendJson(res, 422, { error: 'valid tenant name and color required', code: 'bad_tenant' });
+  let tenant;
+  await core.mutate((store) => {
+    tenant = store.tenants.find((row) => row.id === ctx.tenant.id);
+    tenant.name = name; tenant.branding = { ...(tenant.branding || {}), color };
+    addAudit(store, ctx, 'tenant.settings.updated', 'tenant', tenant.id);
+  });
+  core.sendJson(res, 200, { tenant: publicTenant(tenant) });
+}
+
 async function apiMemberRole(req, res, ctx) {
   const b = ctx.body || {};
   const role = String(b.role || '');
@@ -960,12 +1262,61 @@ async function apiMemberRole(req, res, ctx) {
 
 function apiAdminOverview(req, res) {
   const d = core.db();
-  core.sendJson(res, 200, { totals: { tenants: d.tenants.length, users: d.users.length, openTickets: d.supportTickets.filter((t) => t.status !== 'closed').length, walletPaise: d.wallets.reduce((n, w) => n + w.balancePaise, 0), calls: d.usage.reduce((n, u) => n + (u.calls || 0), 0) } });
+  const issued = d.invoices.filter((row) => row.status === 'issued' || row.status === 'paid');
+  core.sendJson(res, 200, { totals: {
+    tenants: d.tenants.length,
+    activeTenants: d.tenants.filter((t) => (t.status || 'active') === 'active').length,
+    closedTenants: d.tenants.filter((t) => t.status === 'closed').length,
+    users: d.users.length,
+    openTickets: d.supportTickets.filter((t) => t.status !== 'closed').length,
+    walletPaise: d.wallets.reduce((n, w) => n + w.balancePaise, 0),
+    calls: d.usage.reduce((n, u) => n + (u.calls || 0), 0),
+    invoicedPaise: issued.reduce((n, row) => n + row.amountPaise, 0),
+    outstandingPaise: d.invoices.filter((row) => row.status === 'issued').reduce((n, row) => n + row.amountPaise, 0),
+  } });
 }
 
 function apiAdminTenants(req, res) {
   const d = core.db();
-  core.sendJson(res, 200, { tenants: d.tenants.map((t) => ({ ...publicTenant(t), users: d.users.filter((u) => u.tenantId === t.id).length, wallet: publicWallet(d.wallets.find((w) => w.tenantId === t.id) || { id: null, tenantId: t.id, currency: 'INR', balancePaise: 0 }) })) });
+  core.sendJson(res, 200, { tenants: d.tenants.map((t) => ({
+    ...publicTenant(t),
+    users: d.users.filter((u) => u.tenantId === t.id).length,
+    agents: d.agents.filter((a) => a.tenantId === t.id).length,
+    calls: d.usage.filter((u) => u.tenantId === t.id).reduce((n, row) => n + Number(row.calls || 0), 0),
+    lastApproachedAt: t.lastApproachedAt || null,
+    outstandingPaise: d.invoices.filter((row) => row.tenantId === t.id && row.status === 'issued').reduce((n, row) => n + row.amountPaise, 0),
+    wallet: publicWallet(d.wallets.find((w) => w.tenantId === t.id) || { id: null, tenantId: t.id, currency: 'INR', balancePaise: 0 }),
+  })) });
+}
+
+async function apiAdminTenantCreate(req, res, ctx) {
+  if (rejectImpersonated(res, ctx)) return;
+  const b = ctx.body || {};
+  const name = String(b.name || '').trim().slice(0, 80);
+  const ownerEmail = String(b.ownerEmail || '').trim().toLowerCase().slice(0, 160);
+  const password = String(b.password || '');
+  if (!name) return core.sendJson(res, 422, { error: 'client workspace name required', code: 'bad_tenant' });
+  if (ownerEmail && (!EMAIL_RE.test(ownerEmail) || password.length < 12)) return core.sendJson(res, 422, { error: 'a valid owner email and 12 character temporary password are required together', code: 'bad_owner' });
+  if (!ownerEmail && password) return core.sendJson(res, 422, { error: 'owner email is required when a password is supplied', code: 'bad_owner' });
+  if (ownerEmail && core.db().users.some((user) => user.email === ownerEmail)) return core.sendJson(res, 409, { error: 'owner email is already registered', code: 'email_taken' });
+  let tenant; let user = null;
+  await core.mutate((store) => {
+    const now = new Date().toISOString();
+    tenant = {
+      id: core.genId('t_'), name, slug: makeSlug(name, new Set(store.tenants.map((t) => t.slug))),
+      createdAt: now, branding: { color: '#B88A2D' }, providers: { ...DEFAULT_PROVIDERS },
+      plan: 'studio', status: ownerEmail ? 'active' : 'onboarding', privacyMode: 'standard',
+    };
+    store.tenants.push(tenant);
+    store.wallets.push({ id: core.genId('wal_'), tenantId: tenant.id, currency: 'INR', balancePaise: 0, createdAt: now, updatedAt: now });
+    if (ownerEmail) {
+      user = { id: core.genId('u_'), tenantId: tenant.id, email: ownerEmail, name: String(b.ownerName || 'Client Owner').trim().slice(0, 80), passHash: core.hashPassword(password), role: 'owner', status: 'active', createdAt: now };
+      store.users.push(user);
+    }
+    store.clientActivities.push({ id: core.genId('act_'), tenantId: tenant.id, type: 'workspace_created', channel: 'internal', visibility: 'internal', summary: 'Client workspace created in Agency OS.', actorUserId: ctx.user.id, createdAt: now });
+    addAudit(store, ctx, 'admin.tenant.created', 'tenant', tenant.id, { ownerCreated: !!user });
+  });
+  core.sendJson(res, 201, { tenant: publicTenant(tenant), owner: user ? publicUser(user) : null, note: 'No email was sent.' });
 }
 
 function apiAdminUsers(req, res) { core.sendJson(res, 200, { users: core.db().users.map(publicUser) }); }
@@ -983,7 +1334,7 @@ function apiAdminTenantDetail(req, res) {
   const url = new URL(req.url, 'http://localhost'); const tenantId = String(url.searchParams.get('tenantId') || ''); const d = core.db();
   const tenant = d.tenants.find((t) => t.id === tenantId);
   if (!tenant) return core.sendJson(res, 404, { error: 'tenant not found', code: 'not_found' });
-  core.sendJson(res, 200, { tenant: publicTenant(tenant), users: d.users.filter((u) => u.tenantId === tenantId).map(publicUser), agents: d.agents.filter((a) => a.tenantId === tenantId).map(publicAgent), numbers: d.byonConnections.filter((x) => x.tenantId === tenantId).map((x) => ({ id: x.id, provider: x.provider, address: x.address, label: x.label, status: x.status, createdAt: x.createdAt })), usage: d.usage.filter((x) => x.tenantId === tenantId).slice(-100).reverse(), tickets: d.supportTickets.filter((x) => x.tenantId === tenantId), wallet: publicWallet(d.wallets.find((w) => w.tenantId === tenantId) || { id: null, tenantId, currency: 'INR', balancePaise: 0 }), ledger: d.ledger.filter((x) => x.tenantId === tenantId).slice(-100).reverse() });
+  core.sendJson(res, 200, { tenant: publicTenant(tenant), users: d.users.filter((u) => u.tenantId === tenantId).map(publicUser), agents: d.agents.filter((a) => a.tenantId === tenantId).map(publicAgent), numbers: d.byonConnections.filter((x) => x.tenantId === tenantId).map((x) => ({ id: x.id, provider: x.provider, address: x.address, label: x.label, status: x.status, createdAt: x.createdAt })), usage: d.usage.filter((x) => x.tenantId === tenantId).slice(-100).reverse(), tickets: d.supportTickets.filter((x) => x.tenantId === tenantId), wallet: publicWallet(d.wallets.find((w) => w.tenantId === tenantId) || { id: null, tenantId, currency: 'INR', balancePaise: 0 }), ledger: d.ledger.filter((x) => x.tenantId === tenantId).slice(-100).reverse(), invoices: d.invoices.filter((x) => x.tenantId === tenantId).map(publicInvoice), activities: d.clientActivities.filter((x) => x.tenantId === tenantId).slice(-100).reverse(), statusEvents: d.tenantStatusEvents.filter((x) => x.tenantId === tenantId).slice(-100).reverse() });
 }
 
 async function apiAdminImpersonate(req, res, ctx) {
@@ -1010,10 +1361,17 @@ async function apiAdminTenantStatus(req, res, ctx) {
   if (rejectImpersonated(res, ctx)) return;
   const b = ctx.body || {};
   const status = String(b.status || '');
-  if (!['active', 'suspended', 'closed'].includes(status)) return core.sendJson(res, 422, { error: 'invalid status', code: 'bad_status' });
+  if (!['onboarding', 'active', 'suspended', 'closed'].includes(status)) return core.sendJson(res, 422, { error: 'invalid status', code: 'bad_status' });
   const tenant = core.db().tenants.find((t) => t.id === String(b.tenantId || ''));
   if (!tenant) return core.sendJson(res, 404, { error: 'tenant not found', code: 'not_found' });
-  await core.mutate((d) => { d.tenants.find((t) => t.id === tenant.id).status = status; if (status !== 'active') d.sessions = d.sessions.filter((s) => s.tenantId !== tenant.id); addAudit(d, ctx, 'admin.tenant.status', 'tenant', tenant.id, { status }); });
+  await core.mutate((d) => {
+    const now = new Date().toISOString();
+    d.tenants.find((t) => t.id === tenant.id).status = status;
+    if (status !== 'active') d.sessions = d.sessions.filter((s) => s.tenantId !== tenant.id);
+    d.tenantStatusEvents.push({ id: core.genId('tse_'), tenantId: tenant.id, fromStatus: tenant.status || 'active', toStatus: status, reason: String(b.reason || '').trim().slice(0, 240), actorUserId: ctx.user.id, createdAt: now });
+    d.clientActivities.push({ id: core.genId('act_'), tenantId: tenant.id, type: status === 'closed' ? 'offboarded' : 'status_changed', channel: 'internal', visibility: 'internal', summary: `Client status changed from ${tenant.status || 'active'} to ${status}.`, actorUserId: ctx.user.id, createdAt: now });
+    addAudit(d, ctx, 'admin.tenant.status', 'tenant', tenant.id, { status });
+  });
   core.sendJson(res, 200, { tenant: publicTenant({ ...tenant, status }) });
 }
 
@@ -1123,12 +1481,21 @@ function handleProviderError(res, e) {
    ========================================================================== */
 
 const server = http.createServer(async (req, res) => {
-  const ip = req.socket.remoteAddress || 'local';
+  const ip = requestRateKey(req);
   const route = (req.url || '/').split('?')[0];
 
   try {
     if (route.startsWith('/api/')) {
       if (!core.rateOk(ip)) return core.sendJson(res, 429, { error: 'rate limited', code: 'rate' });
+
+      const payuInbound = route === '/api/payu/callback' || route === '/api/payu/webhook' || route === '/api/payu/return';
+      if (!['GET', 'HEAD', 'OPTIONS'].includes(req.method || '') && !payuInbound && !requestOriginAllowed(req)) {
+        return core.sendJson(res, 403, { error: 'cross-origin request blocked', code: 'bad_origin' });
+      }
+      const requestContentType = String(req.headers['content-type'] || '').split(';')[0].trim().toLowerCase();
+      if (!['GET', 'HEAD', 'OPTIONS'].includes(req.method || '') && !payuInbound && requestContentType && requestContentType !== 'application/json') {
+        return core.sendJson(res, 415, { error: 'application/json required', code: 'bad_content_type' });
+      }
 
       if ((route === '/api/payu/callback' || route === '/api/payu/webhook' || route === '/api/payu/return') && req.method === 'POST') {
         let form;
@@ -1160,6 +1527,10 @@ const server = http.createServer(async (req, res) => {
         if (route === '/api/privacy') return core.requireAuth(req, res, apiPrivacyGet);
         if (route === '/api/members') return core.requireRole(req, res, 'owner', apiMembers);
         if (route === '/api/audit') return core.requireRole(req, res, 'owner', apiAudit);
+        if (route === '/api/agency/overview') return core.requireRole(req, res, 'owner', apiAgencyOverview);
+        if (route === '/api/agency/prompt') return core.requireRole(req, res, 'owner', apiAgencyPromptGet);
+        if (route === '/api/invoices') return core.requireRole(req, res, 'owner', apiInvoices);
+        if (route === '/api/integrations') return core.requireRole(req, res, 'owner', apiIntegrations);
         if (route === '/api/demo-links') return core.requireRole(req, res, 'owner', apiDemoLinksList);
         if (route === '/api/admin/overview') return core.requireRole(req, res, 'super_admin', apiAdminOverview);
         if (route === '/api/admin/tenants') return core.requireRole(req, res, 'super_admin', apiAdminTenants);
@@ -1217,7 +1588,14 @@ const server = http.createServer(async (req, res) => {
       if (route === '/api/support/tickets/reply') return core.requireAuth(req, res, apiSupportReply, body);
       if (route === '/api/byon') return core.requireRole(req, res, 'owner', apiByonSave, body);
       if (route === '/api/privacy') return core.requireRole(req, res, 'owner', apiPrivacyMode, body);
+      if (route === '/api/tenant/update') return core.requireRole(req, res, 'owner', apiTenantUpdate, body);
       if (route === '/api/members/role') return core.requireRole(req, res, 'owner', apiMemberRole, body);
+      if (route === '/api/invoices') return core.requireRole(req, res, 'admin', apiInvoiceCreate, body);
+      if (route === '/api/invoices/status') return core.requireRole(req, res, 'admin', apiInvoiceStatus, body);
+      if (route === '/api/integrations/request') return core.requireRole(req, res, 'owner', apiIntegrationRequest, body);
+      if (route === '/api/agency/prompt') return core.requireRole(req, res, 'owner', apiAgencyPromptSave, body);
+      if (route === '/api/admin/client-approach') return core.requireRole(req, res, 'admin', apiClientApproach, body);
+      if (route === '/api/admin/tenants') return core.requireRole(req, res, 'super_admin', apiAdminTenantCreate, body);
       if (route === '/api/admin/tenants/status') return core.requireRole(req, res, 'super_admin', apiAdminTenantStatus, body);
       if (route === '/api/admin/users/status') return core.requireRole(req, res, 'super_admin', apiAdminUserStatus, body);
       if (route === '/api/admin/users/role') return core.requireRole(req, res, 'super_admin', apiAdminUserRole, body);
@@ -1233,6 +1611,10 @@ const server = http.createServer(async (req, res) => {
 
     if (req.method === 'GET' && route.startsWith('/demo/')) {
       req.url = '/demo.html';
+    }
+    if (['GET', 'HEAD'].includes(req.method || '') && route === '/console.html') {
+      res.writeHead(302, { Location: '/app.html', 'Cache-Control': 'no-store' });
+      return res.end();
     }
     // Everything else is a static file from public/.
     core.serveStatic(req, res);
@@ -1260,8 +1642,9 @@ function rejectUpgrade(socket, status, label) {
 server.on('upgrade', async (req, socket, head) => {
   const route = (req.url || '').split('?')[0];
   if (route !== '/api/stt/stream') return rejectUpgrade(socket, 404, 'Not Found');
+  if (!requestOriginAllowed(req)) return rejectUpgrade(socket, 403, 'Forbidden');
 
-  const ip = req.socket.remoteAddress || 'local';
+  const ip = requestRateKey(req);
   if (!core.rateOk(ip)) return rejectUpgrade(socket, 429, 'Too Many Requests');
 
   try {

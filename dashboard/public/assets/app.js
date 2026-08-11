@@ -44,8 +44,12 @@ const State = {
   presets: [],
   tickets: [],
   demoLinks: [],
+  agency: null,
+  invoices: [],
+  integrations: [],
+  agencyPrompt: null,
   activeAgentId: null, // for Talk-to-it
-  loaded: { agents: false, providers: false, usage: false, telephony: false, wallet: false, presets: false, tickets: false, demoLinks: false }
+  loaded: { agents: false, providers: false, usage: false, telephony: false, wallet: false, presets: false, tickets: false, demoLinks: false, agency: false, invoices: false, integrations: false, agencyPrompt: false }
 };
 
 const VOICE_MODELS = ['mulberry', 'muga'];
@@ -120,8 +124,7 @@ function modal(opts) {
   // opts: { title, body(node), confirmText, confirmKind, onConfirm, cancelText }
   const host = $('#modal-host');
   const close = () => { host.classList.add('hide'); host.setAttribute('aria-hidden', 'true'); host.innerHTML = ''; };
-  const confirmBtn = el('button', { class: 'btn ' + (opts.confirmKind === 'danger' ? 'btn-primary' : 'btn-primary') }, opts.confirmText || 'Confirm');
-  if (opts.confirmKind === 'danger') confirmBtn.style.background = 'linear-gradient(100deg,#fb7185,#e11d48)';
+  const confirmBtn = el('button', { class: 'btn ' + (opts.confirmKind === 'danger' ? 'btn-danger' : 'btn-primary') }, opts.confirmText || 'Confirm');
   confirmBtn.addEventListener('click', async () => {
     confirmBtn.disabled = true;
     try { await opts.onConfirm(); close(); }
@@ -150,19 +153,18 @@ function initials(name) {
   const parts = String(name || '?').trim().split(/\s+/).slice(0, 2);
   return parts.map((p) => p[0]).join('').toUpperCase() || '?';
 }
+function isPlatformUserClient(user) {
+  return !!user && (user.role === 'super_admin' || user.role === 'admin');
+}
 function brandSVG(size) {
-  // Inline logo mark, gradient. Returns an <svg> node so we never depend on logo.svg loading.
+  // Inline operating-system mark. Returns an <svg> node so auth remains resilient.
   const ns = 'http://www.w3.org/2000/svg';
-  const gid = 'lg' + Math.random().toString(36).slice(2, 7);
   const svg = document.createElementNS(ns, 'svg');
   svg.setAttribute('viewBox', '0 0 40 40');
   svg.setAttribute('width', size || 30); svg.setAttribute('height', size || 30);
   svg.innerHTML =
-    '<defs><linearGradient id="' + gid + '" x1="0" y1="0" x2="1" y2="1">' +
-    '<stop offset="0" stop-color="#34E7E4"/><stop offset="0.55" stop-color="#6E7BFF"/><stop offset="1" stop-color="#A855F7"/>' +
-    '</linearGradient></defs>' +
-    '<path d="M20 3 L34 11 V29 L20 37 L6 29 V11 Z" fill="none" stroke="url(#' + gid + ')" stroke-width="2"/>' +
-    '<path d="M14 20 h2 l2 -6 3 12 2 -8 2 4 h3" fill="none" stroke="url(#' + gid + ')" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>';
+    '<rect x="4" y="4" width="32" height="32" rx="10" fill="#171713"/>' +
+    '<path d="M12 27V13h7.4c4.1 0 6.6 2.1 6.6 5.5 0 2.4-1.2 4.1-3.4 5l4.1 3.5h-4.3l-3.6-3.1h-3.2V27H12Zm3.6-6.3h3.5c2.1 0 3.2-.7 3.2-2.2s-1.1-2.2-3.2-2.2h-3.5v4.4Z" fill="#D8B35A"/>';
   return svg;
 }
 function fmtInr(n) {
@@ -173,6 +175,19 @@ function skeleton(kind, n) {
   const frag = document.createDocumentFragment();
   for (let i = 0; i < (n || 1); i++) frag.appendChild(el('div', { class: 'sk ' + (kind || 'sk-card') }));
   return frag;
+}
+
+let chartsPromise = null;
+function ensureCharts() {
+  if (window.RapidXCharts) return Promise.resolve(window.RapidXCharts);
+  if (chartsPromise) return chartsPromise;
+  chartsPromise = new Promise((resolve, reject) => {
+    const script = el('script', { src: '/assets/charts.js?v=20260811-agency1' });
+    script.onload = () => window.RapidXCharts ? resolve(window.RapidXCharts) : reject(new Error('Analytics bundle did not initialize.'));
+    script.onerror = () => reject(new Error('Analytics bundle could not be loaded.'));
+    document.head.appendChild(script);
+  });
+  return chartsPromise;
 }
 
 /* ===========================================================================
@@ -201,33 +216,62 @@ function renderAuth() {
     const errBox = el('div', { class: 'auth-err', id: 'authErr' });
     const fields = [];
     if (mode === 'signup') {
-      fields.push(field('Your name', el('input', { class: 'input', id: 'f_name', type: 'text', placeholder: 'Shreyas Raj', autocomplete: 'name' })));
-      fields.push(field('Company', el('input', { class: 'input', id: 'f_company', type: 'text', placeholder: 'Acme Co', autocomplete: 'organization' })));
+      fields.push(field('Your name', el('input', { class: 'input', id: 'f_name', type: 'text', placeholder: 'Your full name', autocomplete: 'name' })));
+      fields.push(field('Company', el('input', { class: 'input', id: 'f_company', type: 'text', placeholder: 'Your agency or company', autocomplete: 'organization' })));
     }
-    fields.push(field('Email', el('input', { class: 'input', id: 'f_email', type: 'email', placeholder: 'you@company.com', autocomplete: 'email' })));
-    fields.push(field('Password', el('input', { class: 'input', id: 'f_pass', type: 'password', placeholder: '••••••••', autocomplete: mode === 'signup' ? 'new-password' : 'current-password' })));
+    const emailInput = el('input', { class: 'input', id: 'f_email', type: 'email', placeholder: 'you@company.com', autocomplete: 'email' });
+    const passwordInput = el('input', { class: 'input', id: 'f_pass', type: 'password', placeholder: 'Enter your password', autocomplete: mode === 'signup' ? 'new-password' : 'current-password' });
+    const showPassword = el('button', { class: 'auth-show-password', type: 'button', 'aria-label': 'Show password', onclick: () => {
+      const visible = passwordInput.type === 'text';
+      passwordInput.type = visible ? 'password' : 'text';
+      showPassword.textContent = visible ? 'Show' : 'Hide';
+      showPassword.setAttribute('aria-label', visible ? 'Show password' : 'Hide password');
+    } }, 'Show');
+    fields.push(field('Work email', emailInput));
+    fields.push(el('div', { class: 'field' }, [el('label', { for: 'f_pass' }, 'Password'), el('div', { class: 'auth-password' }, [passwordInput, showPassword])]));
 
-    const submit = el('button', { class: 'btn btn-primary btn-lg', type: 'submit' }, mode === 'login' ? 'Sign in' : 'Create account');
+    const submit = el('button', { class: 'btn btn-primary btn-lg auth-submit', type: 'submit' }, mode === 'login' ? 'Enter Agency OS' : 'Create workspace');
 
     const form = el('form', { class: 'auth-form', onsubmit: onSubmit }, fields.concat([errBox, submit]));
 
-    const card = el('div', { class: 'auth-card' }, [
+    const formPanel = el('section', { class: 'auth-form-panel' }, [
       el('div', { class: 'auth-brand' }, [
         (function () { const s = brandSVG(34); s.classList.add('lm'); return s; })(),
-        el('span', { class: 'nm' }, [document.createTextNode('RapidX '), el('em', {}, 'Voice')])
+        el('span', { class: 'nm' }, [document.createTextNode('RapidX '), el('em', {}, 'Agency OS')])
       ]),
-      el('h1', {}, mode === 'login' ? 'Welcome back' : 'Start building'),
-      el('p', { class: 'sub' }, mode === 'login' ? 'Sign in to your voice agent console.' : 'Spin up a tenant and ship AI voice agents from ₹1/min for the AI layer. Telephony is separate.'),
+      el('div', { class: 'auth-heading' }, [
+        el('span', { class: 'section-kicker' }, mode === 'login' ? 'Secure operator access' : 'New workspace'),
+        el('h1', {}, mode === 'login' ? 'Welcome back.' : 'Run the whole agency.'),
+        el('p', { class: 'sub' }, mode === 'login' ? 'Clients, money, voice agents, invoices, and operations in one place.' : 'Create an isolated workspace for AI voice operations. Telephony and carrier charges remain separate.')
+      ]),
       form,
       el('div', { class: 'auth-toggle' }, [
-        document.createTextNode(mode === 'login' ? 'New to RapidX Voice. ' : 'Already have an account. '),
-        el('button', { type: 'button', onclick: () => { mode = mode === 'login' ? 'signup' : 'login'; draw(); } }, mode === 'login' ? 'Create one' : 'Sign in')
+        document.createTextNode(mode === 'login' ? 'Need a new workspace? ' : 'Already have a workspace? '),
+        el('button', { type: 'button', onclick: () => { mode = mode === 'login' ? 'signup' : 'login'; draw(); } }, mode === 'login' ? 'Create account' : 'Sign in')
       ]),
-      mode === 'login' ? el('div', { class: 'auth-demo' }, 'Use your workspace email and password. Test accounts are provisioned securely by the platform admin.') : null
+      mode === 'login' ? el('div', { class: 'auth-demo' }, [el('span', { class: 'auth-demo-dot' }), el('span', {}, 'Use your workspace credentials. Admin access is role-gated and audited.')]) : null
+    ]);
+
+    const proofPanel = el('aside', { class: 'auth-proof-panel' }, [
+      el('div', { class: 'auth-grid-pattern', 'aria-hidden': 'true' }),
+      el('div', { class: 'auth-proof-top' }, [
+        el('span', { class: 'auth-proof-label' }, 'Agency command centre'),
+        el('span', { class: 'auth-live-pill' }, [el('span', {}), 'Voice stack online'])
+      ]),
+      el('div', { class: 'auth-proof-copy' }, [
+        el('h2', {}, 'One operating system. Every client signal.'),
+        el('p', {}, 'Know what is live, what is owed, which clients need attention, and what the team should do next.')
+      ]),
+      el('div', { class: 'auth-proof-metrics' }, [
+        el('div', {}, [el('strong', {}, '₹'), el('span', {}, 'Invoice and wallet clarity')]),
+        el('div', {}, [el('strong', {}, '24/7'), el('span', {}, 'Voice agent operations')]),
+        el('div', {}, [el('strong', {}, '100%'), el('span', {}, 'Audited admin actions')])
+      ]),
+      el('div', { class: 'auth-capabilities' }, ['Client lifecycle', 'Invoices', 'AI voice agents', 'WhatsApp ready', 'Ad research ready'].map((label) => el('span', {}, label)))
     ]);
 
     root.innerHTML = '';
-    root.appendChild(el('div', { class: 'auth-wrap' }, card));
+    root.appendChild(el('div', { class: 'auth-wrap' }, [formPanel, proofPanel]));
     const first = $('#' + (mode === 'signup' ? 'f_name' : 'f_email'));
     if (first) first.focus();
   }
@@ -245,7 +289,7 @@ function renderAuth() {
     if (!email || !password) { showErr('Email and password are required.'); return; }
     if (mode === 'signup' && password.length < 12) { showErr('Use at least 12 characters for your password.'); return; }
     const btn = e.target.querySelector('button[type=submit]');
-    btn.disabled = true; btn.textContent = mode === 'login' ? 'Signing in...' : 'Creating...';
+    btn.disabled = true; btn.textContent = mode === 'login' ? 'Opening Agency OS...' : 'Creating workspace...';
     try {
       let body, route;
       if (mode === 'signup') {
@@ -261,7 +305,7 @@ function renderAuth() {
       toast(mode === 'login' ? 'Signed in.' : 'Account created.', 'ok');
       renderShell();
     } catch (ex) {
-      btn.disabled = false; btn.textContent = mode === 'login' ? 'Sign in' : 'Create account';
+      btn.disabled = false; btn.textContent = mode === 'login' ? 'Enter Agency OS' : 'Create workspace';
       if (ex.status === 409) showErr('That email is already registered. Try signing in.');
       else if (ex.status === 401) showErr('Wrong email or password.');
       else showErr(ex.message || 'Something went wrong.');
@@ -275,7 +319,8 @@ function resetData() {
   State.agents = []; State.providers = null; State.usage = null; State.telephony = null;
   State.wallet = null; State.presets = []; State.tickets = [];
   State.demoLinks = [];
-  State.loaded = { agents: false, providers: false, usage: false, telephony: false, wallet: false, presets: false, tickets: false, demoLinks: false };
+  State.agency = null; State.invoices = []; State.integrations = []; State.agencyPrompt = null;
+  State.loaded = { agents: false, providers: false, usage: false, telephony: false, wallet: false, presets: false, tickets: false, demoLinks: false, agency: false, invoices: false, integrations: false, agencyPrompt: false };
   State.activeAgentId = null;
 }
 
@@ -290,9 +335,12 @@ const ROUTES = [
   { id: 'demos', label: 'Demo links', icon: 'link', ownerOnly: true },
   { id: 'talk', label: 'Talk to it', icon: 'mic' },
   { id: 'telephony', label: 'Telephony', icon: 'phone' },
+  { id: 'invoices', label: 'Invoices', icon: 'invoice', ownerOnly: true },
+  { id: 'integrations', label: 'Integrations', icon: 'plug', ownerOnly: true },
+  { id: 'agency-prompt', label: 'Agency prompt', icon: 'prompt', ownerOnly: true },
   { id: 'billing', label: 'Billing', icon: 'wallet' },
   { id: 'support', label: 'Support', icon: 'support' },
-  { id: 'admin', label: 'Admin', icon: 'shield', adminOnly: true },
+  { id: 'admin', label: 'Clients', icon: 'shield', adminOnly: true },
   { id: 'settings', label: 'Settings', icon: 'gear' }
 ];
 
@@ -309,6 +357,9 @@ function navIcon(name) {
     support: '<path d="M4 13a8 8 0 0 1 16 0v5a2 2 0 0 1-2 2h-3"/><path d="M4 13v4H2v-4h2M20 13v4h2v-4h-2"/>',
     shield: '<path d="M12 3 20 6v6c0 5-3.4 8-8 9-4.6-1-8-4-8-9V6l8-3z"/><path d="m9 12 2 2 4-5"/>',
     link: '<path d="M10.5 13.5a4 4 0 0 0 5.7 0l2.3-2.3a4 4 0 0 0-5.7-5.7l-1.3 1.3"/><path d="M13.5 10.5a4 4 0 0 0-5.7 0l-2.3 2.3a4 4 0 0 0 5.7 5.7l1.3-1.3"/>',
+    invoice: '<path d="M6 3h9l3 3v15H6z"/><path d="M15 3v4h4M9 11h6M9 15h6M9 19h4"/>',
+    plug: '<path d="M8 3v5M16 3v5M6 8h12v2a6 6 0 0 1-12 0V8zM12 16v5"/>',
+    prompt: '<rect x="3" y="4" width="18" height="16" rx="3"/><path d="m7 9 2 2-2 2M12 13h5"/>',
     logout: '<path d="M14 3.5H6.5A1.5 1.5 0 0 0 5 5v14a1.5 1.5 0 0 0 1.5 1.5H14"/><path d="M17 8l4 4-4 4"/><path d="M21 12H9"/>'
   };
   return '<svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">' + (paths[name] || paths.grid) + '</svg>';
@@ -331,7 +382,7 @@ function renderShell() {
   const side = el('aside', { class: 'side' }, [
     el('div', { class: 'side-brand' }, [
       (function () { const s = brandSVG(30); s.classList.add('lm'); return s; })(),
-      el('span', { class: 'nm' }, [document.createTextNode('RapidX '), el('em', {}, 'Voice')])
+      el('span', { class: 'nm' }, [document.createTextNode('RapidX '), el('em', {}, 'Agency OS')])
     ]),
     nav,
     el('div', { class: 'side-foot' }, [
@@ -350,7 +401,7 @@ function renderShell() {
     el('div', { class: 'flex items-center gap-2', style: 'min-width:0' }, [
       el('button', { class: 'menu-btn', 'aria-label': 'Menu', onclick: () => $('.shell').classList.toggle('nav-open'), html: '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 7h16M4 12h16M4 17h16"/></svg>' }),
       el('div', { class: 'top-route' }, [
-        el('span', { class: 'crumb' }, 'RapidX Voice'),
+        el('span', { class: 'crumb' }, isPlatformUserClient(u) ? 'Agency command centre' : 'RapidX Voice'),
         el('span', { class: 'ttl', id: 'routeTitle' }, 'Overview')
       ])
     ]),
@@ -453,7 +504,8 @@ function onRoute() {
   view.appendChild(wrap);
   ({
     overview: viewOverview, agents: viewAgents, presets: viewPresets, studio: viewStudio, demos: viewDemoLinks,
-    talk: viewTalk, telephony: viewTelephony, billing: viewBilling,
+    talk: viewTalk, telephony: viewTelephony, invoices: viewInvoices, integrations: viewIntegrations,
+    'agency-prompt': viewAgencyPrompt, billing: viewBilling,
     support: viewSupport, admin: viewAdmin, settings: viewSettings
   }[id] || viewOverview)(wrap);
 }
@@ -461,13 +513,84 @@ function goto(id) { location.hash = '#/' + id; }
 
 /* ---- shared view header ---- */
 function viewHead(title, sub) {
-  return el('div', { class: 'view-head' }, [el('h2', {}, title), sub ? el('p', {}, sub) : null]);
+  return el('div', { class: 'view-head' }, [el('div', { class: 'view-head-copy' }, [el('h2', {}, title), sub ? el('p', {}, sub) : null])]);
 }
 
 /* ===========================================================================
    1. OVERVIEW
    =========================================================================== */
 async function viewOverview(root) {
+  if (isPlatformUserClient(State.me && State.me.user)) return viewAgencyOverview(root);
+  return viewTenantOverview(root);
+}
+
+async function viewAgencyOverview(root) {
+  const name = State.me.user.name || State.me.user.email;
+  const head = viewHead('Good evening, ' + name + '.', 'Revenue, client activity, invoices, and operational risk across the agency.');
+  head.appendChild(el('div', { class: 'view-actions' }, [
+    el('button', { class: 'btn btn-ghost', onclick: () => goto('admin') }, 'Open clients'),
+    el('button', { class: 'btn btn-primary', onclick: () => goto('invoices') }, 'Issue invoice')
+  ]));
+  root.appendChild(head);
+  const chartHost = el('div', { class: 'agency-chart-host', 'aria-busy': 'true' }, [skeleton('sk-stat', 4), skeleton('sk-card', 2)]);
+  const recentHost = el('div', { class: 'card agency-recent-card' }, skeleton('sk-card', 1));
+  const actionCard = el('div', { class: 'card agency-command-card' }, [
+    el('span', { class: 'section-kicker' }, 'Next actions'),
+    el('h3', {}, 'Move the agency forward.'),
+    el('p', {}, 'Log client outreach, issue an invoice, review setup requests, or update the operating prompt.'),
+    el('div', { class: 'agency-action-list' }, [
+      actionLink('Approach a client', 'Record a WhatsApp, email, call, or meeting touchpoint.', 'admin'),
+      actionLink('Issue an invoice', 'Create a stored INR invoice and track its lifecycle.', 'invoices'),
+      actionLink('Review integrations', 'WhatsApp and Meta Ad Library setup states.', 'integrations'),
+      actionLink('Edit agency prompt', 'Keep one persistent operating instruction.', 'agency-prompt')
+    ])
+  ]);
+  root.appendChild(chartHost);
+  root.appendChild(el('div', { class: 'agency-bottom-grid' }, [recentHost, actionCard]));
+  try {
+    const data = await api('/api/agency/overview');
+    State.agency = data; State.loaded.agency = true;
+    chartHost.innerHTML = ''; chartHost.removeAttribute('aria-busy');
+    const charts = await ensureCharts();
+    charts.mountAgencyDashboard(chartHost, data);
+    renderRecentAgencyActivity(recentHost, data.recent || []);
+  } catch (e) {
+    chartHost.innerHTML = '';
+    chartHost.appendChild(el('div', { class: 'card card-pad error-state' }, [el('h3', {}, 'Agency analytics unavailable'), el('p', {}, e.message || 'Could not load analytics.'), el('button', { class: 'btn btn-ghost', onclick: () => onRoute() }, 'Try again')]));
+    renderRecentAgencyActivity(recentHost, []);
+  }
+}
+
+function actionLink(title, copy, route) {
+  return el('button', { class: 'agency-action', onclick: () => goto(route) }, [
+    el('span', {}, [el('strong', {}, title), el('small', {}, copy)]),
+    el('span', { class: 'agency-action-arrow', 'aria-hidden': 'true' }, '→')
+  ]);
+}
+
+function renderRecentAgencyActivity(host, rows) {
+  host.innerHTML = '';
+  host.appendChild(el('div', { class: 'agency-card-head' }, [el('div', {}, [el('span', { class: 'section-kicker' }, 'Live operations'), el('h3', {}, 'Recent client activity')]), el('button', { class: 'btn btn-quiet btn-sm', onclick: () => goto('admin') }, 'View clients')]));
+  if (!rows.length) {
+    host.appendChild(el('div', { class: 'empty compact' }, [el('div', { class: 'ttl' }, 'No client activity yet'), el('p', {}, 'Approaches and lifecycle changes will appear here.') ]));
+    return;
+  }
+  rows.forEach((row) => host.appendChild(el('div', { class: 'agency-activity-row' }, [
+    el('span', { class: 'agency-activity-icon' }, initials(row.tenantName)),
+    el('div', {}, [el('strong', {}, row.tenantName), el('p', {}, row.summary || row.type)]),
+    el('time', {}, relativeTime(row.createdAt))
+  ])));
+}
+
+function relativeTime(iso) {
+  const diff = Math.max(0, Date.now() - new Date(iso).getTime());
+  if (diff < 60000) return 'now';
+  if (diff < 3600000) return Math.floor(diff / 60000) + 'm';
+  if (diff < 86400000) return Math.floor(diff / 3600000) + 'h';
+  return Math.floor(diff / 86400000) + 'd';
+}
+
+async function viewTenantOverview(root) {
   const name = State.me.user.name || State.me.user.email;
   root.appendChild(viewHead('Welcome back, ' + name + '.', 'Your voice stack at a glance. Provider health, usage, and the fastest way into a build.'));
 
@@ -2139,6 +2262,208 @@ function createFromPreset(preset) {
   });
 }
 
+/* ===========================================================================
+   AGENCY FINANCE, INTEGRATIONS, AND OPERATING PROMPT
+   =========================================================================== */
+async function viewInvoices(root) {
+  const canManage = isPlatformUserClient(State.me.user);
+  const head = viewHead('Invoices', canManage ? 'Create, issue, and track agency invoices. Stored status never implies an email was sent.' : 'Review invoices issued to this workspace. Agency operators control status and collection records.');
+  if (canManage) head.appendChild(el('div', { class: 'view-actions' }, [el('button', { class: 'btn btn-primary', onclick: openInvoiceComposer }, 'Create invoice')]));
+  root.appendChild(head);
+  const summary = el('div', { class: 'invoice-summary-grid' }, skeleton('sk-stat', 4));
+  const tableCard = el('section', { class: 'card invoice-table-card' }, skeleton('sk-card', 1));
+  root.appendChild(summary); root.appendChild(tableCard);
+  try {
+    const out = await api('/api/invoices');
+    State.invoices = out.invoices || []; State.loaded.invoices = true;
+    paintInvoices(summary, tableCard, State.invoices);
+  } catch (e) {
+    summary.innerHTML = '';
+    tableCard.innerHTML = '';
+    tableCard.appendChild(el('div', { class: 'error-state' }, [el('h3', {}, 'Invoices unavailable'), el('p', {}, e.message), el('button', { class: 'btn btn-ghost', onclick: () => onRoute() }, 'Try again')]));
+  }
+}
+
+function invoiceEffectiveStatus(row) { return row.status || row.storedStatus || 'draft'; }
+function invoiceStatusLabel(status) { return String(status || 'draft').replace(/_/g, ' '); }
+function paintInvoices(summary, host, rows) {
+  const sums = { outstanding: 0, overdue: 0, paid: 0, issued: 0 };
+  rows.forEach((row) => {
+    const status = invoiceEffectiveStatus(row);
+    if (status === 'issued' || status === 'overdue') sums.outstanding += row.amountPaise || 0;
+    if (status === 'overdue') sums.overdue += row.amountPaise || 0;
+    if (status === 'paid') sums.paid += row.amountPaise || 0;
+    if (row.storedStatus === 'issued' || row.storedStatus === 'paid') sums.issued += row.amountPaise || 0;
+  });
+  summary.innerHTML = '';
+  [['Outstanding', sums.outstanding, 'Issued and unpaid'], ['Overdue', sums.overdue, 'Past the due date'], ['Paid', sums.paid, 'Recorded as collected'], ['Total issued', sums.issued, 'Excludes drafts and voids']].forEach((item, index) => summary.appendChild(el('article', { class: 'agency-metric' + (index === 1 ? ' critical' : index === 2 ? ' positive' : '') }, [el('div', { class: 'agency-metric-label' }, item[0]), el('div', { class: 'agency-metric-value' }, '₹' + fmtInr(item[1] / 100)), el('div', { class: 'agency-metric-note' }, item[2])] )));
+  host.innerHTML = '';
+  const controls = el('div', { class: 'invoice-table-head' }, [
+    el('div', {}, [el('span', { class: 'section-kicker' }, 'Agency finance'), el('h3', {}, 'Invoice register')]),
+    el('div', { class: 'invoice-filters' }, ['all','draft','issued','overdue','paid','void'].map((status) => el('button', { class: 'invoice-filter' + (status === 'all' ? ' active' : ''), 'data-filter': status, onclick: (event) => {
+      $$('.invoice-filter', host).forEach((button) => button.classList.toggle('active', button === event.currentTarget));
+      renderInvoiceRows(host.querySelector('tbody'), rows, status);
+    } }, invoiceStatusLabel(status))))
+  ]);
+  const table = el('table', { class: 'data-table invoice-table' }, [
+    el('thead', {}, el('tr', {}, ['Invoice','Client','Issued','Due','Status','Amount',''].map((label) => el('th', {}, label)))),
+    el('tbody')
+  ]);
+  host.appendChild(controls);
+  host.appendChild(el('div', { class: 'table-scroll' }, table));
+  renderInvoiceRows(table.querySelector('tbody'), rows, 'all');
+}
+
+function renderInvoiceRows(body, rows, filter) {
+  body.innerHTML = '';
+  const visible = rows.filter((row) => filter === 'all' || invoiceEffectiveStatus(row) === filter);
+  if (!visible.length) {
+    const canManage = isPlatformUserClient(State.me.user);
+    const cell = el('td', { colspan: '7' }, el('div', { class: 'empty compact' }, [el('div', { class: 'ttl' }, filter === 'all' ? 'No invoices yet' : 'No ' + filter + ' invoices'), el('p', {}, canManage ? 'Create an invoice to start the register.' : 'Agency-issued invoices will appear here.'), filter === 'all' && canManage ? el('button', { class: 'btn btn-primary btn-sm', onclick: openInvoiceComposer }, 'Create invoice') : null]));
+    body.appendChild(el('tr', {}, cell)); return;
+  }
+  visible.forEach((row) => {
+    const status = invoiceEffectiveStatus(row);
+    body.appendChild(el('tr', {}, [
+      el('td', { class: 'mono-cell' }, row.invoiceNumber),
+      el('td', {}, [el('strong', {}, row.clientName), row.clientEmail ? el('small', {}, row.clientEmail) : null]),
+      el('td', {}, row.issueDate), el('td', {}, row.dueDate),
+      el('td', {}, el('span', { class: 'status-badge status-' + status }, invoiceStatusLabel(status))),
+      el('td', { class: 'money-cell' }, '₹' + fmtInr((row.amountPaise || 0) / 100)),
+      el('td', {}, el('button', { class: 'btn btn-quiet btn-sm', onclick: () => inspectInvoice(row) }, 'Open'))
+    ]));
+  });
+}
+
+async function openInvoiceComposer() {
+  if (!isPlatformUserClient(State.me.user)) { toast('Only agency operators can create invoices.', 'err'); return; }
+  let tenants = [];
+  if (isPlatformUserClient(State.me.user)) {
+    try { tenants = (await api('/api/admin/tenants')).tenants || []; } catch (_) {}
+  }
+  if (!tenants.length) tenants = [State.me.tenant];
+  const tenantSelect = el('select', { class: 'select' }, tenants.map((tenant) => el('option', { value: tenant.id }, tenant.name)));
+  const clientName = el('input', { class: 'input', value: tenants[0].name || '' });
+  tenantSelect.onchange = () => { const selected = tenants.find((tenant) => tenant.id === tenantSelect.value); if (selected) clientName.value = selected.name; };
+  const clientEmail = el('input', { class: 'input', type: 'email', placeholder: 'billing@client.com' });
+  const description = el('textarea', { class: 'textarea', placeholder: 'Automation system implementation and monthly operations' });
+  const amount = el('input', { class: 'input', type: 'number', min: '1', max: '10000000', step: '0.01', placeholder: '5000' });
+  const issueDate = el('input', { class: 'input', type: 'date', value: new Date().toISOString().slice(0, 10) });
+  const due = new Date(Date.now() + 14 * 86400000).toISOString().slice(0, 10);
+  const dueDate = el('input', { class: 'input', type: 'date', value: due });
+  const issueNow = el('input', { type: 'checkbox', checked: 'checked' }); issueNow.checked = true;
+  modal({
+    title: 'Create invoice',
+    body: el('div', { class: 'invoice-form' }, [
+      field('Client workspace', tenantSelect), field('Client name', clientName), field('Billing email, optional', clientEmail), field('Amount in INR', amount), field('Issue date', issueDate), field('Due date', dueDate), field('Description', description),
+      el('label', { class: 'check-row' }, [issueNow, el('span', {}, [el('strong', {}, 'Issue now'), el('small', {}, 'Stores an issued invoice. It does not send an email.')])])
+    ]),
+    confirmText: 'Create invoice',
+    onConfirm: async () => {
+      const paise = Math.round(Number(amount.value) * 100);
+      const out = await api('/api/invoices', { method: 'POST', body: { tenantId: tenantSelect.value, clientName: clientName.value.trim(), clientEmail: clientEmail.value.trim(), description: description.value.trim(), amountPaise: paise, issueDate: issueDate.value, dueDate: dueDate.value, issueNow: issueNow.checked } });
+      toast(out.note || 'Invoice created.', 'ok');
+      State.loaded.invoices = false; goto('invoices'); onRoute();
+    }
+  });
+}
+
+function inspectInvoice(row) {
+  const status = invoiceEffectiveStatus(row);
+  const actions = el('div', { class: 'invoice-detail-actions' });
+  if (isPlatformUserClient(State.me.user)) {
+    if (row.storedStatus === 'draft') actions.appendChild(el('button', { class: 'btn btn-primary', onclick: () => updateInvoiceStatus(row.id, 'issued') }, 'Issue invoice'));
+    if (row.storedStatus === 'issued') actions.appendChild(el('button', { class: 'btn btn-primary', onclick: () => updateInvoiceStatus(row.id, 'paid') }, 'Mark paid'));
+    if (row.storedStatus === 'draft' || row.storedStatus === 'issued') actions.appendChild(el('button', { class: 'btn btn-ghost', onclick: () => updateInvoiceStatus(row.id, 'void') }, 'Void invoice'));
+  }
+  actions.appendChild(el('button', { class: 'btn btn-ghost', onclick: () => window.print() }, 'Print'));
+  modal({
+    title: row.invoiceNumber,
+    body: el('article', { class: 'invoice-detail' }, [
+      el('div', { class: 'invoice-detail-top' }, [el('div', {}, [el('span', { class: 'section-kicker' }, 'Billed to'), el('h4', {}, row.clientName), row.clientEmail ? el('p', {}, row.clientEmail) : null]), el('span', { class: 'status-badge status-' + status }, invoiceStatusLabel(status))]),
+      el('div', { class: 'invoice-detail-amount' }, [el('span', {}, 'Amount'), el('strong', {}, '₹' + fmtInr((row.amountPaise || 0) / 100))]),
+      el('p', { class: 'invoice-detail-description' }, row.description),
+      el('dl', {}, [el('div', {}, [el('dt', {}, 'Issued'), el('dd', {}, row.issueDate)]), el('div', {}, [el('dt', {}, 'Due'), el('dd', {}, row.dueDate)]), el('div', {}, [el('dt', {}, 'Delivery'), el('dd', {}, row.deliveryStatus === 'not_sent' ? 'Not emailed' : row.deliveryStatus)])]),
+      actions
+    ]),
+    confirmText: 'Close', onConfirm: async () => {}
+  });
+}
+
+async function updateInvoiceStatus(invoiceId, status) {
+  try {
+    await api('/api/invoices/status', { method: 'POST', body: { invoiceId, status } });
+    toast('Invoice marked ' + invoiceStatusLabel(status) + '.', 'ok');
+    const host = $('#modal-host'); if (host) host.classList.add('hide');
+    onRoute();
+  } catch (e) { toast(e.message, 'err'); }
+}
+
+async function viewIntegrations(root) {
+  root.appendChild(viewHead('Integrations', 'Bring client conversations and ad research into the operating system without pretending setup is complete.'));
+  const host = el('div', { class: 'integration-grid' }, skeleton('sk-card', 2)); root.appendChild(host);
+  try {
+    const out = await api('/api/integrations');
+    State.integrations = out.integrations || []; State.loaded.integrations = true;
+    host.innerHTML = '';
+    State.integrations.forEach((item) => host.appendChild(integrationCard(item)));
+  } catch (e) { host.innerHTML = ''; host.appendChild(el('div', { class: 'card card-pad error-state' }, e.message)); }
+}
+
+function integrationCard(item) {
+  const requested = item.status === 'requested';
+  const mark = item.id === 'whatsapp-business' ? 'WA' : 'META';
+  const button = el('button', { class: 'btn ' + (requested ? 'btn-ghost' : 'btn-primary'), disabled: requested ? 'disabled' : null }, requested ? 'Setup requested' : 'Request setup');
+  button.onclick = async () => {
+    button.disabled = true; button.textContent = 'Recording request...';
+    try { const out = await api('/api/integrations/request', { method: 'POST', body: { integrationId: item.id } }); toast(out.note, 'ok'); onRoute(); }
+    catch (e) { button.disabled = false; button.textContent = 'Request setup'; toast(e.message, 'err'); }
+  };
+  return el('article', { class: 'card integration-card' }, [
+    el('div', { class: 'integration-head' }, [el('span', { class: 'integration-mark' }, mark), el('span', { class: 'status-badge ' + (requested ? 'status-requested' : 'status-setup') }, requested ? 'requested' : 'setup required')]),
+    el('span', { class: 'section-kicker' }, item.category), el('h3', {}, item.name), el('p', {}, item.description),
+    el('div', { class: 'integration-columns' }, [
+      el('div', {}, [el('h4', {}, 'What you will see'), el('ul', {}, (item.capabilities || []).map((value) => el('li', {}, value)))]),
+      el('div', {}, [el('h4', {}, 'Required to connect'), el('ul', {}, (item.setup || []).map((value) => el('li', {}, value)))])
+    ]),
+    el('div', { class: 'integration-foot' }, [button, el('small', {}, 'No external service is contacted by this request.')])
+  ]);
+}
+
+async function viewAgencyPrompt(root) {
+  root.appendChild(viewHead('Agency prompt', 'One persistent operating instruction for this workspace. Per-agent personas remain separate.'));
+  const host = el('div', { class: 'prompt-layout' }, [el('section', { class: 'card prompt-editor' }, skeleton('sk-card', 1)), el('aside', { class: 'card prompt-guide' }, skeleton('sk-card', 1))]);
+  root.appendChild(host);
+  try {
+    const out = await api('/api/agency/prompt'); State.agencyPrompt = out; State.loaded.agencyPrompt = true;
+    paintAgencyPrompt(host, out);
+  } catch (e) { host.innerHTML = ''; host.appendChild(el('div', { class: 'card card-pad error-state' }, e.message)); }
+}
+
+function paintAgencyPrompt(host, data) {
+  const text = el('textarea', { class: 'agency-prompt-text', maxlength: '12000', placeholder: 'Define how Agency OS should reason about client priorities, reporting, delivery quality, and escalation...' });
+  text.value = data.prompt || '';
+  const count = el('span', { class: 'prompt-count' }, text.value.length.toLocaleString('en-IN') + ' / 12,000');
+  text.oninput = () => { count.textContent = text.value.length.toLocaleString('en-IN') + ' / 12,000'; };
+  const save = el('button', { class: 'btn btn-primary' }, 'Save operating prompt');
+  save.onclick = async () => {
+    save.disabled = true; save.textContent = 'Saving...';
+    try { const out = await api('/api/agency/prompt', { method: 'POST', body: { prompt: text.value } }); toast('Agency prompt saved as version ' + out.version + '.', 'ok'); paintAgencyPrompt(host, out); }
+    catch (e) { toast(e.message, 'err'); save.disabled = false; save.textContent = 'Save operating prompt'; }
+  };
+  const editor = el('section', { class: 'card prompt-editor' }, [
+    el('div', { class: 'prompt-meta' }, [el('div', {}, [el('span', { class: 'section-kicker' }, 'Persistent context'), el('h3', {}, 'Agency operating prompt')]), el('span', { class: 'status-badge status-active' }, 'Version ' + (data.version || 0))]),
+    text,
+    el('div', { class: 'prompt-editor-foot' }, [el('div', {}, [count, el('small', {}, data.updatedAt ? 'Updated ' + new Date(data.updatedAt).toLocaleString('en-IN') + (data.updatedBy ? ' by ' + data.updatedBy : '') : 'Not saved yet')]), save])
+  ]);
+  const guide = el('aside', { class: 'card prompt-guide' }, [
+    el('span', { class: 'section-kicker' }, 'Prompt contract'), el('h3', {}, 'What belongs here'),
+    el('ul', {}, ['Agency priorities and escalation rules', 'Reporting cadence and decision principles', 'Delivery quality standards', 'How to treat client money and access'].map((value) => el('li', {}, value))),
+    el('div', { class: 'prompt-boundary' }, [el('strong', {}, 'Boundary'), el('p', {}, 'This text does not authorize external messages, calls, payments, or tool actions. Those still require their normal confirmation gates.')])
+  ]);
+  host.innerHTML = ''; host.appendChild(editor); host.appendChild(guide);
+}
+
 async function viewBilling(root) {
   root.appendChild(viewHead('Billing', 'Prepaid INR wallet, immutable transaction history, and secure PayU checkout.'));
   const host = el('div', { class: 'grid grid-12' }, [
@@ -2234,11 +2559,13 @@ function ticketCard(t, admin) {
 async function viewAdmin(root) {
   if (!State.me || !['super_admin', 'admin'].includes(State.me.user.role)) { goto('overview'); return; }
   const superAdmin = State.me.user.role === 'super_admin';
-  root.appendChild(viewHead(superAdmin ? 'Super admin' : 'Operations admin', 'Users, workspaces, phone numbers, calls, billing, support, and immutable audit history.'));
-  const stats = el('div', { class: 'grid grid-3' }, skeleton('sk-stat', 5));
-  const tenantHost = el('div', { class: 'card card-pad admin-table' }, skeleton('sk-card', 1));
+  const head = viewHead('Clients', 'Add, approach, inspect, pause, and offboard client workspaces with an immutable activity trail.');
+  if (superAdmin) head.appendChild(el('div', { class: 'view-actions' }, [el('button', { class: 'btn btn-primary', onclick: openClientComposer }, 'Add client')]));
+  root.appendChild(head);
+  const stats = el('div', { class: 'admin-kpi-grid' }, skeleton('sk-stat', 5));
+  const tenantHost = el('div', { class: 'card admin-client-card' }, skeleton('sk-card', 1));
   const ticketHost = el('div', { class: 'ticket-list' }, skeleton('sk-card', 2));
-  const eventHost = el('div', { class: 'card card-pad admin-table' }, skeleton('sk-card', 1));
+  const eventHost = el('div', { class: 'card card-pad admin-table agency-events-card' }, skeleton('sk-card', 1));
   root.appendChild(stats); root.appendChild(el('div', { class: 'admin-layout' }, [tenantHost, ticketHost])); root.appendChild(eventHost);
   try {
     const calls = [api('/api/admin/tickets'), api('/api/admin/payment-events')];
@@ -2247,12 +2574,12 @@ async function viewAdmin(root) {
     const o = superAdmin ? data[0] : { totals: {} }, ts = superAdmin ? data[1] : { tenants: [] }, users = superAdmin ? data[2] : { users: [] }, tickets = data[superAdmin ? 3 : 0], events = data[superAdmin ? 4 : 1];
     stats.innerHTML = '';
     const totals = o.totals || {};
-    [['Tenants', totals.tenants || 'Restricted'], ['Users', totals.users || 'Restricted'], ['Open tickets', totals.openTickets != null ? totals.openTickets : (tickets.tickets || []).filter((t) => t.status !== 'closed').length], ['Wallet total', superAdmin ? '₹' + fmtInr((totals.walletPaise || 0) / 100) : 'Restricted'], ['Calls', superAdmin ? totals.calls : 'Restricted']].forEach((x) => stats.appendChild(statCard(x[0], String(x[1] || 0), 'All workspaces')));
-    tenantHost.innerHTML = ''; tenantHost.appendChild(el('h3', { class: 't-h3' }, 'Tenants'));
+    [['Active clients', totals.activeTenants != null ? totals.activeTenants : 'Restricted', 'Live workspaces'], ['Revenue recorded', superAdmin ? '₹' + fmtInr((totals.invoicedPaise || 0) / 100) : 'Restricted', 'Issued invoices'], ['Outstanding', superAdmin ? '₹' + fmtInr((totals.outstandingPaise || 0) / 100) : 'Restricted', 'Receivables'], ['Open tickets', totals.openTickets != null ? totals.openTickets : (tickets.tickets || []).filter((t) => t.status !== 'closed').length, 'Needs attention'], ['Calls', superAdmin ? totals.calls : 'Restricted', 'Tracked usage']].forEach((x) => stats.appendChild(el('article', { class: 'agency-metric' }, [el('div', { class: 'agency-metric-label' }, x[0]), el('div', { class: 'agency-metric-value' }, String(x[1] || 0)), el('div', { class: 'agency-metric-note' }, x[2])])));
+    tenantHost.innerHTML = ''; tenantHost.appendChild(el('div', { class: 'admin-client-head' }, [el('div', {}, [el('span', { class: 'section-kicker' }, 'Portfolio'), el('h3', {}, 'Client workspaces')]), superAdmin ? el('button', { class: 'btn btn-ghost btn-sm', onclick: openClientComposer }, 'Add client') : null]));
     if (superAdmin) (ts.tenants || []).forEach((t) => tenantHost.appendChild(adminTenantRow(t, (users.users || []).filter((u) => u.tenantId === t.id))));
     else tenantHost.appendChild(el('div', { class: 'muted' }, 'Tenant controls require super admin access.'));
     ticketHost.innerHTML = ''; (tickets.tickets || []).forEach((t) => ticketHost.appendChild(ticketCard(t, true)));
-    eventHost.innerHTML = ''; eventHost.appendChild(el('h3', { class: 't-h3' }, 'PayU webhook log'));
+    eventHost.innerHTML = ''; eventHost.appendChild(el('div', { class: 'agency-card-head' }, [el('div', {}, [el('span', { class: 'section-kicker' }, 'Financial operations'), el('h3', {}, 'PayU event log')]) ]));
     (events.events || []).slice(0, 25).forEach((e) => eventHost.appendChild(el('div', { class: 'admin-row' }, [el('div', {}, [el('b', {}, e.txnid || 'Unknown transaction'), el('small', { class: 'muted' }, (e.reason || '') + ' · ' + (e.createdAt || ''))]), el('span', { class: 'pill' }, e.status || 'received')])));
     if (!(events.events || []).length) eventHost.appendChild(el('div', { class: 'muted' }, 'No PayU webhooks received yet.'));
   } catch (e) { tenantHost.innerHTML = ''; tenantHost.appendChild(el('div', { class: 'muted' }, e.message)); }
@@ -2268,10 +2595,35 @@ function adminTenantRow(t, users) {
   };
   const credit = el('button', { class: 'btn btn-ghost', onclick: () => adjustWallet(t) }, 'Adjust credit');
   const inspect = el('button', { class: 'btn btn-primary', onclick: () => inspectTenant(t, users || []) }, 'Open workspace');
-  return el('div', { class: 'admin-row' }, [
-    el('div', {}, [el('b', {}, t.name), el('small', { class: 'muted' }, (t.users || 0) + ' users, ₹' + fmtInr((wallet.balancePaise || 0) / 100))]),
-    el('span', { class: 'pill' }, t.status || 'active'), el('div', { class: 'flex gap-2' }, [inspect, credit, toggle])
+  const approach = el('button', { class: 'btn btn-ghost', onclick: () => openClientApproach(t) }, 'Log approach');
+  return el('div', { class: 'admin-client-row' }, [
+    el('div', { class: 'admin-client-identity' }, [el('span', { class: 'client-avatar' }, initials(t.name)), el('div', {}, [el('b', {}, t.name), el('small', { class: 'muted' }, (t.users || 0) + ' users, ' + (t.agents || 0) + ' agents')])]),
+    el('div', { class: 'admin-client-signal' }, [el('span', {}, 'Activity'), el('strong', {}, fmtInr((t.calls || 0)) + ' calls')]),
+    el('div', { class: 'admin-client-signal' }, [el('span', {}, 'Outstanding'), el('strong', {}, '₹' + fmtInr((t.outstandingPaise || 0) / 100))]),
+    el('div', { class: 'admin-client-signal' }, [el('span', {}, 'Wallet'), el('strong', {}, '₹' + fmtInr((wallet.balancePaise || 0) / 100))]),
+    el('span', { class: 'status-badge status-' + (t.status || 'active') }, invoiceStatusLabel(t.status || 'active')),
+    el('div', { class: 'admin-client-actions' }, [inspect, approach, credit, toggle])
   ]);
+}
+
+function openClientComposer() {
+  const name = el('input', { class: 'input', placeholder: 'Client or company name' });
+  const ownerName = el('input', { class: 'input', placeholder: 'Primary owner name, optional' });
+  const ownerEmail = el('input', { class: 'input', type: 'email', placeholder: 'owner@client.com, optional' });
+  const password = el('input', { class: 'input', type: 'password', placeholder: '12+ character temporary password' });
+  modal({ title: 'Add client workspace', body: el('div', { class: 'invoice-form' }, [field('Workspace name', name), field('Owner name', ownerName), field('Owner email', ownerEmail), field('Temporary password', password), el('p', { class: 'form-note' }, 'Leave owner fields empty to create an onboarding workspace. No invitation email will be sent.')]), confirmText: 'Create workspace', onConfirm: async () => {
+    const out = await api('/api/admin/tenants', { method: 'POST', body: { name: name.value.trim(), ownerName: ownerName.value.trim(), ownerEmail: ownerEmail.value.trim(), password: password.value } });
+    toast((out.tenant || {}).name + ' created. ' + out.note, 'ok'); onRoute();
+  }});
+}
+
+function openClientApproach(t) {
+  const channel = el('select', { class: 'select' }, ['whatsapp','email','phone','linkedin','meeting','other'].map((value) => el('option', { value }, invoiceStatusLabel(value))));
+  const summary = el('textarea', { class: 'textarea', placeholder: 'What happened, what they need, and the next move.' });
+  modal({ title: 'Log approach to ' + t.name, body: el('div', { class: 'invoice-form' }, [field('Channel', channel), field('Summary', summary)]), confirmText: 'Record activity', onConfirm: async () => {
+    await api('/api/admin/client-approach', { method: 'POST', body: { tenantId: t.id, channel: channel.value, summary: summary.value.trim() } });
+    toast('Client approach recorded.', 'ok'); onRoute();
+  }});
 }
 
 async function inspectTenant(t, users) {

@@ -53,6 +53,9 @@ const BASE_HEADERS = {
   'X-Content-Type-Options': 'nosniff',
   'Referrer-Policy': 'no-referrer',
   'X-Frame-Options': 'SAMEORIGIN',
+  'Strict-Transport-Security': 'max-age=31536000',
+  'Permissions-Policy': 'camera=(), geolocation=(), microphone=(self), payment=()',
+  'Content-Security-Policy-Report-Only': "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self' https: wss:; frame-src 'self' https:; object-src 'none'; base-uri 'self'; frame-ancestors 'self'; form-action 'self' https://secure.payu.in https://test.payu.in",
 };
 
 function send(res, status, body, headers = {}) {
@@ -161,11 +164,13 @@ const DB_TMP = `${DB_FILE}.tmp`;
 
 function defaultDb() {
   return {
-    schemaVersion: 3,
+    schemaVersion: 4,
     tenants: [], users: [], agents: [], usage: [], sessions: [],
     wallets: [], ledger: [], paymentIntents: [], supportTickets: [],
     supportMessages: [], auditEvents: [], presets: [], byonConnections: [],
     hvacJobs: [], hvacSettings: [], paymentEvents: [], demoLinks: [],
+    invoices: [], invoiceEvents: [], integrationRequests: [], agencyPrompts: [],
+    clientActivities: [], tenantStatusEvents: [],
   };
 }
 
@@ -173,12 +178,14 @@ const COLLECTIONS = [
   'tenants', 'users', 'agents', 'usage', 'sessions', 'wallets', 'ledger',
   'paymentIntents', 'supportTickets', 'supportMessages', 'auditEvents',
   'presets', 'byonConnections', 'hvacJobs', 'hvacSettings', 'paymentEvents', 'demoLinks',
+  'invoices', 'invoiceEvents', 'integrationRequests', 'agencyPrompts',
+  'clientActivities', 'tenantStatusEvents',
 ];
 
 function migrateDb(parsed) {
   const out = Object.assign(defaultDb(), parsed || {});
   for (const k of COLLECTIONS) if (!Array.isArray(out[k])) out[k] = [];
-  out.schemaVersion = 3;
+  out.schemaVersion = 4;
   for (const tenant of out.tenants) {
     if (!tenant.status) tenant.status = 'active';
     if (!tenant.privacyMode) tenant.privacyMode = 'standard';
@@ -217,8 +224,10 @@ function loadDb() {
 function flushSync() {
   ensureDataDir();
   const json = JSON.stringify(_db, null, 2);
-  fs.writeFileSync(DB_TMP, json);
+  fs.writeFileSync(DB_TMP, json, { mode: 0o600 });
+  fs.chmodSync(DB_TMP, 0o600);
   fs.renameSync(DB_TMP, DB_FILE);
+  fs.chmodSync(DB_FILE, 0o600);
 }
 
 /**
@@ -314,7 +323,8 @@ function sessionCookie(token) {
 
 // Build the Set-Cookie header value that clears the session.
 function clearCookie() {
-  return `${COOKIE_NAME}=; HttpOnly; Path=/; Max-Age=0; SameSite=Lax`;
+  const secure = process.env.NODE_ENV === 'production' ? '; Secure' : '';
+  return `${COOKIE_NAME}=; HttpOnly; Path=/; Max-Age=0; SameSite=Lax${secure}`;
 }
 
 // Parse the request cookie header for our session token.
