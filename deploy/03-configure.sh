@@ -4,37 +4,54 @@
 
 TOK=$(dograh_token); export TOK
 ok "Authenticated as $DOGRAH_EMAIL"
+TELEPHONY_PROVIDER="${TELEPHONY_PROVIDER:-telnyx}"
+TELEPHONY_COUNTRY_CODE="${TELEPHONY_COUNTRY_CODE:-$( [ "$TELEPHONY_PROVIDER" = "vobiz" ] && printf IN || printf BR )}"
 
-# ---- a) Vobiz telephony configuration --------------------------------------
-# application_id is deliberately omitted so Dograh creates its OWN Vobiz
-# application and points the answer_url at this box. Reusing another product's
-# application id is the number one cause of a call that connects then sits silent.
-say "Creating the Vobiz telephony configuration"
+# ---- a) Telephony configuration --------------------------------------------
+say "Creating the $TELEPHONY_PROVIDER telephony configuration"
 CFG=$(api POST /api/v1/organizations/telephony-configs "$(python3 - <<PY
 import json,os
-print(json.dumps({
-  "name": "Vobiz Outbound",
-  "is_default_outbound": True,
-  "config": {
-    "provider": "vobiz",
-    "auth_id": os.environ["VOBIZ_AUTH_ID"],
-    "auth_token": os.environ["VOBIZ_AUTH_TOKEN"],
-    "from_numbers": [os.environ["VOBIZ_NUMBER"].lstrip("+")],
-  },
-}))
+provider=os.environ.get("TELEPHONY_PROVIDER","telnyx").strip().lower()
+if provider == "telnyx":
+    number=os.environ["TELNYX_NUMBER"]
+    payload={
+      "name":"Telnyx Outbound",
+      "is_default_outbound": True,
+      "config": {
+        "provider":"telnyx",
+        "api_key": os.environ["TELNYX_API_KEY"],
+        "connection_id": os.environ.get("TELNYX_CONNECTION_ID",""),
+        "from_numbers":[number],
+      },
+    }
+elif provider == "vobiz":
+    payload={
+      "name":"Vobiz Outbound",
+      "is_default_outbound": True,
+      "config": {
+        "provider":"vobiz",
+        "auth_id": os.environ["VOBIZ_AUTH_ID"],
+        "auth_token": os.environ["VOBIZ_AUTH_TOKEN"],
+        "from_numbers":[os.environ["VOBIZ_NUMBER"].lstrip("+")],
+      },
+    }
+else:
+    raise SystemExit(f"Unsupported TELEPHONY_PROVIDER: {provider}")
+print(json.dumps(payload))
 PY
 )")
 CFG_ID=$(printf '%s' "$CFG" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
 ok "Telephony config id $CFG_ID"
 
 # ---- b) Attach the number as default caller ID ------------------------------
-say "Attaching $VOBIZ_NUMBER"
+ACTIVE_NUMBER="${TELNYX_NUMBER:-$VOBIZ_NUMBER}"
+say "Attaching $ACTIVE_NUMBER"
 PN=$(api POST "/api/v1/organizations/telephony-configs/$CFG_ID/phone-numbers" "$(python3 - <<PY
 import json,os
 print(json.dumps({
-  "address": os.environ["VOBIZ_NUMBER"],
-  "country_code": "IN",
-  "label": "Vobiz Outbound",
+  "address": os.environ.get("TELNYX_NUMBER") or os.environ["VOBIZ_NUMBER"],
+  "country_code": os.environ.get("TELEPHONY_COUNTRY_CODE","BR"),
+  "label": os.environ.get("TELEPHONY_PROVIDER","telnyx").strip().title() + " Outbound",
   "is_active": True,
   "is_default_caller_id": True,
 }))
@@ -94,7 +111,7 @@ ok "Workflow id $WF_ID active"
 
 # Bind inbound calls only after the workflow exists. This also makes Dograh
 # update the provider application's answer_url and synchronize the DID.
-say "Binding the Vobiz number to workflow $WF_ID for inbound calls"
+say "Binding the active number to workflow $WF_ID for inbound calls"
 api PUT "/api/v1/organizations/telephony-configs/$CFG_ID/phone-numbers/$PN_ID" \
   "$(python3 - <<PY
 import json

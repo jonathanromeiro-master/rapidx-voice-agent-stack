@@ -2100,7 +2100,7 @@ function blobToBase64(blob) {
    5. TELEPHONY
    =========================================================================== */
 async function viewTelephony(root) {
-  root.appendChild(viewHead('Telephony', 'Your VoBiz numbers and call routing, connected through Dograh. Outbound calls require an explicit confirmation.'));
+  root.appendChild(viewHead('Telephony', 'Your carrier numbers and call routing, connected through Dograh. Outbound calls require an explicit confirmation.'));
 
   const statusHost = el('div', { class: 'card card-pad', id: 'telStatus' }, skeleton('sk-line', 5));
   const dialHost = el('div', { class: 'card card-pad' }, dialForm());
@@ -2112,18 +2112,19 @@ async function viewTelephony(root) {
     refreshDialNumbers(s);
   } catch (e) {
     statusHost.innerHTML = '';
-    statusHost.appendChild(el('div', { class: 'muted' }, 'Could not reach VoBiz through Dograh. ' + esc(e.message)));
+    statusHost.appendChild(el('div', { class: 'muted' }, 'Could not reach telephony through Dograh. ' + esc(e.message)));
   }
 }
 
 function paintTelephony(host, s) {
   host.innerHTML = '';
-  const connected = s.connected === true && s.provider === 'vobiz' && s.orchestrator === 'dograh';
+  const providerLabel = s.provider === 'telnyx' ? 'Telnyx via Dograh' : 'VoBiz via Dograh';
+  const connected = s.connected === true && s.orchestrator === 'dograh';
   const config = s.configuration || {};
   const didList = Array.isArray(s.dids) ? s.dids : (s.did ? [{ number: s.did, status: 'active' }] : []);
 
   host.appendChild(el('div', { class: 'flex items-center justify-between', style: 'margin-bottom:14px' }, [
-    el('h3', { class: 't-h3' }, 'VoBiz via Dograh'),
+    el('h3', { class: 't-h3' }, providerLabel),
     el('span', { class: 'pill' }, [
       el('span', { class: 'dot' + (connected ? '' : ' bad') }),
       connected ? 'connected' : 'unavailable'
@@ -2131,7 +2132,7 @@ function paintTelephony(host, s) {
   ]));
 
   if (didList.length) {
-    host.appendChild(el('div', { class: 'muted', style: 'font-size:.8rem;margin-bottom:8px' }, 'VoBiz numbers'));
+    host.appendChild(el('div', { class: 'muted', style: 'font-size:.8rem;margin-bottom:8px' }, 'Configured numbers'));
     didList.forEach((d) => {
       const num = typeof d === 'string' ? d : (d.did_number || d.number || d.did || '');
       const status = d.user_status_label || d.status || 'active';
@@ -2150,7 +2151,7 @@ function paintTelephony(host, s) {
   host.appendChild(el('div', { class: 'divider', style: 'margin:14px 0' }));
   host.appendChild(el('div', { class: 'status-line' }, [
     el('span', { class: 'k' }, 'Configuration'),
-    el('span', { class: 'v' }, config.name || ('VoBiz config ' + (config.id || '')))
+    el('span', { class: 'v' }, config.name || ('Telephony config ' + (config.id || '')))
   ]));
   host.appendChild(el('div', { class: 'status-line' }, [
     el('span', { class: 'k' }, 'Outbound workflow'),
@@ -2161,21 +2162,25 @@ function paintTelephony(host, s) {
     el('a', { class: 'v', href: s.dashboard, target: '_blank', rel: 'noopener', style: 'color:var(--accent)' }, 'Open console')
   ]));
 
-  host.appendChild(el('div', { class: 'inbound-note' }, 'Outbound calls are initiated by Dograh using the active VoBiz configuration. Inbound calls follow the workflow assigned to each VoBiz number.'));
+  host.appendChild(el('div', { class: 'inbound-note' }, 'Outbound calls are initiated by Dograh using the active telephony configuration. Inbound calls follow the workflow assigned to each number.'));
 }
 
 function dialForm() {
-  const numI = el('input', { class: 'input', id: 'dial_num', type: 'tel', inputmode: 'numeric', maxlength: 10, placeholder: '9876543210' });
-  numI.addEventListener('input', () => { numI.value = numI.value.replace(/\D/g, '').slice(0, 10); });
+  const provider = (State.telephony && State.telephony.provider) || 'telnyx';
+  const isVobiz = provider === 'vobiz';
+  const numI = el('input', { class: 'input', id: 'dial_num', type: 'tel', inputmode: 'tel', maxlength: isVobiz ? 10 : 16, placeholder: isVobiz ? '9876543210' : '+5511999999999' });
+  numI.addEventListener('input', () => {
+    numI.value = isVobiz ? numI.value.replace(/\D/g, '').slice(0, 10) : numI.value.replace(/[^\d+]/g, '').slice(0, 16);
+  });
   const btn = el('button', { class: 'btn btn-primary' }, 'Place call');
   const form = el('form', { class: 'dial-form', onsubmit: (e) => { e.preventDefault(); onDial(numI, btn); } }, [
     el('h3', { class: 't-h3' }, 'Outbound call'),
-    el('p', { class: 'muted', style: 'font-size:.85rem' }, 'Enter a 10 digit Indian mobile number. Dograh dials it through your VoBiz number.'),
+    el('p', { class: 'muted', style: 'font-size:.85rem' }, isVobiz ? 'Enter a 10 digit Indian mobile number. Dograh dials it through your VoBiz number.' : 'Enter an E.164 number. Dograh dials it through your configured carrier number.'),
     el('div', { class: 'field' }, [
       el('label', {}, 'Number'),
-      el('div', { class: 'dial-input-row' }, [el('span', { class: 'prefix' }, '+91'), numI])
+      isVobiz ? el('div', { class: 'dial-input-row' }, [el('span', { class: 'prefix' }, '+91'), numI]) : numI
     ]),
-    el('div', { class: 'cost-warn' }, ['This places a ', el('b', {}, 'real paid VoBiz call'), ' and charges your telephony account.']),
+    el('div', { class: 'cost-warn' }, ['This places a ', el('b', {}, 'real paid carrier call'), ' and charges your telephony account.']),
     btn
   ]);
   return form;
@@ -2183,15 +2188,21 @@ function dialForm() {
 function refreshDialNumbers() { /* placeholder for future caller-id selection */ }
 
 function onDial(numI, btn) {
-  const num = (numI.value || '').replace(/\D/g, '');
-  if (num.length !== 10) { toast('Enter a valid 10 digit mobile number.', 'err'); numI.focus(); return; }
+  const provider = (State.telephony && State.telephony.provider) || 'telnyx';
+  const isVobiz = provider === 'vobiz';
+  const num = isVobiz ? (numI.value || '').replace(/\D/g, '') : String(numI.value || '').trim();
+  if ((isVobiz && num.length !== 10) || (!isVobiz && !/^\+[1-9]\d{7,14}$/.test(num))) {
+    toast(isVobiz ? 'Enter a valid 10 digit mobile number.' : 'Enter a valid E.164 number, for example +5511999999999.', 'err');
+    numI.focus();
+    return;
+  }
   modal({
     title: 'Confirm a real call',
     body: el('div', {}, [
-      el('p', {}, ['You are about to place a real outbound call to ', el('b', {}, '+91 ' + num), '.']),
+      el('p', {}, ['You are about to place a real outbound call to ', el('b', {}, isVobiz ? ('+91 ' + num) : num), '.']),
       el('div', { class: 'danger-note' }, [
         el('b', {}, 'This is a live, paid call. '),
-        document.createTextNode('Dograh will initiate it through your VoBiz configuration and charge your telephony account. Only continue if you intend to ring this number now.')
+        document.createTextNode('Dograh will initiate it through your active telephony configuration and charge your telephony account. Only continue if you intend to ring this number now.')
       ])
     ]),
     confirmText: 'Yes, place the call', confirmKind: 'danger',
@@ -2199,7 +2210,7 @@ function onDial(numI, btn) {
       btn.disabled = true; btn.textContent = 'Dialing...';
       try {
         const res = await api('/api/telephony/dial', { method: 'POST', body: { number: num, confirm: true } });
-        toast('Call placed to +91 ' + num + '.', 'ok');
+        toast('Call placed to ' + (isVobiz ? ('+91 ' + num) : num) + '.', 'ok');
         State.loaded.telephony = false; // refresh wallet next view
       } catch (ex) {
         if (ex.status === 400 && ex.data && ex.data.code === 'needs_confirm') toast('Confirmation required. Please retry.', 'err');

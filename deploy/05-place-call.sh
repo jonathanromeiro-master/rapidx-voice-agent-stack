@@ -6,7 +6,7 @@
 : "${PHONE_NUMBER_ID:?Set PHONE_NUMBER_ID in .env}"
 
 TARGET="${1:-${TEST_NUMBER:-}}"
-[ -n "$TARGET" ] || die "Usage: bash deploy/05-place-call.sh +91XXXXXXXXXX"
+[ -n "$TARGET" ] || die "Usage: bash deploy/05-place-call.sh +5511999999999"
 
 say "Placing a REAL call to $TARGET. This is billable."
 read -r -p "Continue? [y/N] " a; [ "$a" = "y" ] || exit 1
@@ -30,8 +30,8 @@ Answer the phone and verify all three, not just the first:
   2. you can talk over it mid-sentence and it stops
   3. it responds to what you actually said
 
-Silence after pickup means the number is bound to a stale Vobiz application
-whose answer_url points somewhere dead. Re-run 03-configure.sh.
+Silence after pickup usually means the number is bound to a stale provider
+application whose answer_url or webhook points somewhere dead. Re-run 03-configure.sh.
 CHECK
 
 sleep 10

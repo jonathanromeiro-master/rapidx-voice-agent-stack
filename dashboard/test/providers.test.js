@@ -40,7 +40,7 @@ test('registry advertises only implemented providers and keeps Deepgram as sole 
   assert.deepEqual(described.stt.map((row) => row.id), ['deepgram']);
   assert.deepEqual(described.tts.map((row) => row.id), ['rumik']);
   assert.deepEqual(described.llm.map((row) => row.id), ['groq', 'gemini']);
-  assert.deepEqual(described.telephony.map((row) => row.id), ['vobiz']);
+  assert.deepEqual(described.telephony.map((row) => row.id), ['telnyx', 'vobiz']);
   assert.equal(JSON.stringify(described).includes('API_KEY_VALUE'), false);
   assert.ok(Object.values(described).flat().every((row) => row.implemented === true));
 });

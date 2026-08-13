@@ -5,7 +5,7 @@
  *   stt        : deepgram, intentionally fixed
  *   tts        : rumik
  *   llm        : groq + gemini
- *   telephony  : vobiz via Dograh
+ *   telephony  : vobiz or telnyx via Dograh
  *
  * Every adapter declares { id, label, needs:[envKeys], ... }. `live` means the
  * adapter is implemented and configured, never merely that a key exists.
@@ -15,7 +15,7 @@
  *
  * Deepgram handles streaming and batch transcription, Rumik keeps the verified
  * browser UA, Groq handles the primary reasoning path, and
- * outbound VoBiz calls always go through Dograh. Never call the raw VoBiz API.
+ * outbound carrier calls always go through Dograh. Never call provider APIs directly.
  *
  * No em dashes anywhere. Commas and periods only.
  */
@@ -507,6 +507,93 @@ const telVobiz = {
   },
 };
 
+const telTelnyx = {
+  id: 'telnyx',
+  label: 'Telnyx via Dograh',
+  layer: 'telephony',
+  needs: [
+    'DOGRAH_BASE_URL', 'DOGRAH_API_KEY', 'DOGRAH_WORKFLOW_ID',
+    'DOGRAH_TELEPHONY_CONFIG_ID', 'DOGRAH_PHONE_NUMBER_ID',
+  ],
+  implemented: true,
+  get live() { return hasEnv(this.needs) && !!String(process.env.TELNYX_NUMBER || '').trim(); },
+  get did() { return String(process.env.TELNYX_NUMBER || '').replace(/[^0-9+]/g, ''); },
+  get dashboard() { return dograhConnection().dashboard; },
+  async request(method, pathname, payload) {
+    return telVobiz.request(method, pathname, payload);
+  },
+  async status() {
+    const configId = positiveIntEnv('DOGRAH_TELEPHONY_CONFIG_ID');
+    const phoneNumberId = positiveIntEnv('DOGRAH_PHONE_NUMBER_ID');
+    const configsResult = await this.request('GET', '/api/v1/organizations/telephony-configs');
+    if (configsResult.up.status < 200 || configsResult.up.status >= 300) {
+      throw new ProviderError('Could not read Telnyx status from Dograh', upstreamStatus(configsResult.up.status),
+        'upstream', upstreamMessage(configsResult.data, 'Dograh telephony status failed.'));
+    }
+    const configs = Array.isArray(configsResult.data.configurations)
+      ? configsResult.data.configurations : [];
+    const config = configs.find((row) => Number(row.id) === configId);
+    if (!config || String(config.provider || '').toLowerCase() !== 'telnyx') {
+      throw new ProviderError('Telnyx is not configured in Dograh', 503, 'not_configured',
+        `Expected Dograh telephony configuration ${configId} with provider telnyx.`);
+    }
+    const numbersResult = await this.request('GET',
+      `/api/v1/organizations/telephony-configs/${configId}/phone-numbers`);
+    if (numbersResult.up.status < 200 || numbersResult.up.status >= 300) {
+      throw new ProviderError('Could not read Telnyx numbers from Dograh', upstreamStatus(numbersResult.up.status),
+        'upstream', upstreamMessage(numbersResult.data, 'Dograh phone-number status failed.'));
+    }
+    const numbers = Array.isArray(numbersResult.data.phone_numbers)
+      ? numbersResult.data.phone_numbers : [];
+    const selectedNumber = numbers.find((row) => Number(row.id) === phoneNumberId);
+    if (!selectedNumber || selectedNumber.is_active === false) {
+      throw new ProviderError('The Telnyx caller ID is not active in Dograh', 503, 'not_configured',
+        `Expected active Dograh phone number ${phoneNumberId}.`);
+    }
+    const dids = numbers.map((row) => ({
+      id: row.id,
+      number: row.address || row.address_normalized,
+      status: row.is_active === false ? 'inactive' : 'active',
+      label: row.label || '',
+      isDefaultCallerId: !!row.is_default_caller_id,
+      inboundWorkflowId: row.inbound_workflow_id,
+      inboundWorkflowName: row.inbound_workflow_name || '',
+    }));
+    return {
+      connected: true,
+      provider: 'telnyx',
+      orchestrator: 'dograh',
+      configuration: {
+        id: config.id,
+        name: config.name,
+        isDefaultOutbound: !!config.is_default_outbound,
+      },
+      dids,
+      did: selectedNumber.address || selectedNumber.address_normalized || this.did,
+      workflowId: positiveIntEnv('DOGRAH_WORKFLOW_ID'),
+      dashboard: this.dashboard,
+    };
+  },
+  async dial(rawNumber, options = {}) {
+    if (!hasEnv(this.needs)) throw notConfigured(this.label, this.needs);
+    const number = String(rawNumber || '').replace(/[^\d+]/g, '');
+    if (!/^\+[1-9]\d{7,14}$/.test(number)) {
+      throw new ProviderError('need a valid E.164 number, for example +5511999999999', 422, 'bad_number');
+    }
+    const result = await this.request('POST', '/api/v1/telephony/initiate-call', {
+      workflow_id: Number.isInteger(options.workflowId) && options.workflowId > 0 ? options.workflowId : positiveIntEnv('DOGRAH_WORKFLOW_ID'),
+      telephony_configuration_id: positiveIntEnv('DOGRAH_TELEPHONY_CONFIG_ID'),
+      from_phone_number_id: positiveIntEnv('DOGRAH_PHONE_NUMBER_ID'),
+      phone_number: number,
+    });
+    if (result.up.status < 200 || result.up.status >= 300) {
+      throw new ProviderError('Dograh could not initiate the Telnyx call', upstreamStatus(result.up.status),
+        'upstream', upstreamMessage(result.data, 'The call was not placed.'));
+    }
+    return { status: result.up.status, data: result.data };
+  },
+};
+
 /* ==========================================================================
    Registries + lookups + describeProviders for GET /api/providers
    ========================================================================== */
@@ -542,12 +629,13 @@ registerProvider('stt', sttDeepgram);
 registerProvider('tts', ttsRumik);
 registerProvider('llm', llmGroq);
 registerProvider('llm', llmGemini);
+registerProvider('telephony', telTelnyx);
 registerProvider('telephony', telVobiz);
 
 function configuredDefaultId(layer) {
   if (layer === 'stt') return 'deepgram';
   const envName = `${layer.toUpperCase()}_PROVIDER`;
-  return String(process.env[envName] || ({ tts: 'rumik', llm: 'groq', telephony: 'vobiz' })[layer] || '').trim().toLowerCase();
+  return String(process.env[envName] || ({ tts: 'rumik', llm: 'groq', telephony: 'telnyx' })[layer] || '').trim().toLowerCase();
 }
 
 function get(layer, id) {
