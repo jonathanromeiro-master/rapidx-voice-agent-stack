@@ -1,152 +1,82 @@
-# RapidX Voice Agent Stack
+# Wayno Outbound Voice Stack
 
-A self-hosted AI phone agent that answers and places real calls, for roughly
-**2 rupees a minute** against 15 to 20 on an ElevenLabs plus Twilio plus GPT stack.
+Este repositório contém a base atual usada para agentes de voz com Dograh e um dashboard Node.js. O código existente nasceu como uma stack mais ampla, com foco multi-tenant e com caminhos prontos para Vobiz e Telnyx via Dograh.
 
-Bare Ubuntu box to a ringing phone in six scripted steps. No SaaS in the middle,
-every key stays on your own server.
+O objetivo desta fase é migrar essa base, sem reescrita desnecessária, para o fluxo operacional interno da Wayno:
 
-```
-git clone https://github.com/toprmrproducer/rapidx-voice-agent-stack.git
-cd rapidx-voice-agent-stack
-cp .env.example .env      # fill in 8 values
-bash deploy/01-deploy-dograh.sh
-```
+- telefonia principal via BR DID + SIP + Asterisk ARI
+- Telnyx mantido como fallback temporário
+- STT local na VPS Oracle
+- TTS local na VPS Oracle
+- Dograh preservado como orquestrador de voz enquanto fizer sentido
+- operação single-tenant interna, não SaaS multi-tenant
 
-Handing this to an AI coding agent instead? Paste
-[`ONE-SHOT-PROMPT.md`](ONE-SHOT-PROMPT.md) and it runs the whole thing end to end.
+## Estado atual auditado
 
----
+- Repositório real: `rapidx-voice-agent-stack/`
+- Linguagens: JavaScript/Node.js, Bash, Python, JSON
+- Orquestrador de voz: Dograh
+- Telefonia atual no repositório: Vobiz legado e Telnyx via Dograh
+- STT atual no repositório: Deepgram
+- TTS atual no repositório: Rumik
+- LLM atual no repositório: Groq, com Gemini no dashboard
+- Dashboard atual: produto Node.js multi-tenant com billing, suporte, admin e demos
+- Workflows atuais: demos branded, não fluxo comercial outbound da Wayno
 
-## The stack
+## O que permanece
 
-| Layer | Component | Why |
-|---|---|---|
-| Orchestrator | [Dograh](https://github.com/dograh-hq/dograh), open source | Node-graph agents, VAD, turn detection, recordings, run logs |
-| Telephony | Vobiz | Native Dograh provider, Plivo-compatible, Indian numbers |
-| Speech to text | Deepgram `nova-3-general` | Multilingual, holds up to Hinglish on an 8k phone stream |
-| Brain | Groq `llama-3.3-70b-versatile` | Fast enough that the pause before a reply is not noticeable |
-| Voice | Rumik silk `mulberry` | Roughly 20x cheaper than ElevenLabs at promo rates |
-| Console | RapidX Voice Studio | Zero-dependency Node app, agent builder plus voice studio |
+- Dograh como base de workflow de voz, enquanto o novo caminho SIP for validado
+- deploy scripts e conhecimento operacional já acumulado
+- registro de providers do dashboard como referência de abstração
+- histórico de troubleshooting já documentado
 
-Every layer is swappable. Dograh natively supports Twilio, Telnyx, Plivo, Vonage
-and Cloudonix for telephony, and the model pipeline takes any STT, LLM or TTS
-provider in its registry.
+## O que muda
 
----
+- BR DID passa a ser o provider primário
+- Asterisk ARI vira a camada de abstração de telefonia
+- Telnyx vira fallback
+- Deepgram sai do caminho principal
+- Rumik sai do caminho principal
+- o fluxo comercial muda de demo/reception para prospecção outbound com cadência e pré-qualificação
+- o escopo do produto deixa de mirar SaaS multi-tenant e passa a priorizar operação interna single-tenant
 
-## What you get
+## Documentação desta migração
 
-- **A real phone agent.** Answers inbound, places outbound, speaks first, and can
-  be interrupted mid-sentence like a person.
-- **Ria, a working receptionist persona.** The full prompt stack is in
-  [`prompts/ria-system-prompts.md`](prompts/ria-system-prompts.md), and the
-  machine-readable workflow is in `workflows/`. Swap two blocks and it is your
-  business instead.
-- **A management console.** Build agents, generate speech, talk to an agent in the
-  browser, see usage and cost in INR.
-- **A reusable SaaS control plane.** Isolated tenants, roles, presets, wallets,
-  PayU checkout, support, privacy modes, BYON requests, audit history and admin tools.
-- **A direct browser voice call.** Dograh SmallWebRTC runs the same published
-  workflow used by the phone path, without rendering transcript text in the UI.
-- **An HVAC example.** Capture call outcomes, route dispatch work, export CSV,
-  and optionally book real Cal.com availability from a tenant-scoped desk.
-- **Run records.** Every call logs its transcript, recording, disposition and the
-  exact provider pipeline it ran on.
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
+- [docs/TELEPHONY.md](docs/TELEPHONY.md)
+- [docs/LOCAL_SPEECH.md](docs/LOCAL_SPEECH.md)
+- [docs/SALES_WORKFLOW.md](docs/SALES_WORKFLOW.md)
+- [docs/CADENCE.md](docs/CADENCE.md)
+- [docs/SECURITY.md](docs/SECURITY.md)
+- [docs/DEPLOYMENT_ORACLE.md](docs/DEPLOYMENT_ORACLE.md)
+- [docs/OBSERVABILITY.md](docs/OBSERVABILITY.md)
+- [docs/UPSTREAM_RESEARCH.md](docs/UPSTREAM_RESEARCH.md)
+- [docs/MIGRATION_TELNYX_TO_BRDID.md](docs/MIGRATION_TELNYX_TO_BRDID.md)
+- [docs/PILOT_PLAN.md](docs/PILOT_PLAN.md)
+- [docs/adr/ADR-001-brdid-as-primary-telephony.md](docs/adr/ADR-001-brdid-as-primary-telephony.md)
+- [docs/adr/ADR-002-asterisk-as-telephony-abstraction.md](docs/adr/ADR-002-asterisk-as-telephony-abstraction.md)
+- [docs/adr/ADR-003-local-stt.md](docs/adr/ADR-003-local-stt.md)
+- [docs/adr/ADR-004-local-tts.md](docs/adr/ADR-004-local-tts.md)
 
----
+## Regras operacionais desta migração
 
-## Repo layout
+- nenhuma chamada PSTN em volume antes de aprovação explícita
+- toda mudança de telefonia deve preservar rollback para Telnyx enquanto o novo caminho não estabilizar
+- segurança primeiro: ARI, SIP, STT e TTS locais devem ficar privados
+- sem reescrita ampla do repositório sem evidência de necessidade
 
-```
-ONE-SHOT-PROMPT.md          paste-into-an-agent version of the whole setup
-.env.example                every value you need, with notes on each
+## Próximas fases
 
-deploy/
-  01-deploy-dograh.sh       bare VPS -> Dograh with HTTPS (swap, firewall, LE cert)
-  02-build-rumik-overlay.sh add Rumik as a TTS provider
-  03-configure.sh           telephony + phone number + model pipeline + workflow
-  04-check-interrupts.sh    verify and fix barge-in, then republish
-  05-place-call.sh          place a real outbound call and read the run back
-  06-deploy-dashboard.sh    optional console on :8787
-  rumik-overlay/Dockerfile  the overlay image
+1. documentação e ADRs
+2. auditoria real da VPS Oracle, sem interromper serviços existentes
+3. abstração de telefonia e feature flag
+4. integração Asterisk ARI + BR DID
+5. STT local
+6. TTS local
+7. ajuste do fluxo comercial, cadência, métricas e testes
 
-workflows/
-  ria-receptionist.json     4-node agent graph, importable as-is
+## Bloqueios externos já identificados
 
-prompts/
-  ria-system-prompts.md     full untruncated prompt stack plus why it reads that way
-
-docs/
-  RUMIK-OVERLAY.md          how the Rumik provider is added, and the --no-deps trap
-  TROUBLESHOOTING.md        every real failure hit on this stack, with real fixes
-  PRICING.md                measured per-minute cost and the defensible claim
-
-dashboard/                  RapidX Voice Studio, no build step and one dependency
-```
-
----
-
-The dashboard has no build step and one pinned runtime dependency, `ws`.
-
-## Requirements
-
-- Ubuntu 24.04 VPS, 4GB RAM recommended (2GB works, the deploy script adds swap)
-- A Vobiz account with a number, from [console.vobiz.ai](https://console.vobiz.ai)
-- API keys: [Deepgram](https://console.deepgram.com),
-  [Groq](https://console.groq.com), [Rumik](https://rumik.ai)
-- Ports 22, 80, 443 open. Plus 3478, 5349 and UDP 49152-49200 for browser calls.
-
-HTTPS comes free via sslip.io, so no DNS setup is needed. Browser microphone
-access requires HTTPS, which is why the deploy issues a real certificate.
-
----
-
-## Four failures worth knowing before you start
-
-Each of these cost real debugging time. All four are handled by the scripts, and
-documented in full in [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md).
-
-1. **A call that connects then sits silent.** The number was bound to a stale
-   Vobiz application pointing at a dead answer_url. Let Dograh create its own
-   application, and place calls through Dograh, never the raw Vobiz endpoint.
-
-2. **An agent that greets and then ignores you.** Realtime native-audio models do
-   not do turn detection over an 8k telephony stream. Use a pipeline, not a
-   realtime brain.
-
-3. **An agent that cannot be interrupted.** `allow_interrupt` defaults to false on
-   a fresh workflow draft. It is a per-node setting, and no pipeline tuning fixes it.
-
-4. **A broken API container after adding Rumik.** Installing `pipecat-rumik`
-   without `--no-deps` pulls upstream pipecat over Dograh's vendored fork.
-
----
-
-## Cost
-
-| | Promo | Permanent |
-|---|---|---|
-| All in, per minute | ~1.6 INR | ~2.6 INR |
-| AI layer only | ~0.90 INR | ~1.90 INR |
-
-Plus 500 INR/month per Vobiz number and $6 to $12/month for the VPS.
-Full breakdown in [`docs/PRICING.md`](docs/PRICING.md).
-
-"AI voice agents from 1 rupee a minute" is defensible for the AI layer. It is not
-true all-in once carrier minutes are counted, so do not claim that.
-
----
-
-## Security
-
-- Every provider key lives in `.env` or server-side config. Keys never reach the
-  browser, the server is the only thing that talks to a provider.
-- `.env` is gitignored. Nothing in this repo contains a real credential.
-- Outbound calls are billable and guarded behind an explicit confirm.
-- Rotate any key that has ever been pasted into a chat, a screenshot or a log.
-
----
-
-Built by [RapidX AI](https://rapidxai.com). MIT licensed. Dograh is separately
-licensed by its authors.
+- push para `origin/main` falhou com `403` para o usuário local
+- auditoria real da VPS depende de IP/SSH válidos
+- teste de telefonia BR DID depende de DID DDD 65 e credenciais SIP
