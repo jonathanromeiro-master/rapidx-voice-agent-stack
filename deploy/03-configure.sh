@@ -14,7 +14,9 @@ PN_ID=""
 INBOUND_PN_ID=""
 
 # ---- a) Telephony configuration --------------------------------------------
-if [ "$TELEPHONY_PROVIDER" = "brdid_asterisk" ]; then
+if [ "$TELEPHONY_PROVIDER" = "brdid_asterisk" ] && [ -z "${BRDID_CALLER_ID:-}" ]; then
+  say "BR DID is not configured; skipping telephony configuration"
+elif [ "$TELEPHONY_PROVIDER" = "brdid_asterisk" ]; then
   : "${ASTERISK_ARI_URL:?Set ASTERISK_ARI_URL in .env}"
   : "${ASTERISK_ARI_APP:?Set ASTERISK_ARI_APP in .env}"
   : "${ASTERISK_ARI_PASSWORD:?Set ASTERISK_ARI_PASSWORD in .env}"
@@ -176,10 +178,13 @@ else:
     raise SystemExit(f"Unsupported LLM_PROVIDER: {llm_provider}")
 
 if tts_provider == "local_piper":
+    local_tts_base_url=os.environ["LOCAL_TTS_BASE_URL"].rstrip("/")
+    if not local_tts_base_url.endswith("/v1"):
+        local_tts_base_url += "/v1"
     tts = {
       "provider":"openai",
       "api_key":os.environ.get("LOCAL_TTS_API_KEY","none"),
-      "base_url":os.environ["LOCAL_TTS_BASE_URL"],
+      "base_url":local_tts_base_url,
       "model":os.environ.get("LOCAL_TTS_MODEL","piper"),
       "voice":os.environ.get("LOCAL_TTS_VOICE","pt_BR-faber-medium"),
     }
@@ -242,7 +247,7 @@ PY
 )" >/dev/null
 ok "Inbound workflow attached"
 else
-die "Telephony configuration did not produce an inbound phone number"
+ok "Inbound binding skipped until BR DID is configured"
 fi
 
 # ---- verify -----------------------------------------------------------------

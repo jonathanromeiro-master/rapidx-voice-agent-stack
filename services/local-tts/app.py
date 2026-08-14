@@ -39,6 +39,13 @@ def wav_content_type(status, data):
     return "audio/wav"
 
 
+def model_list():
+    return {
+        "object": "list",
+        "data": [{"id": "piper", "object": "model", "created": 0, "owned_by": "rapidx-local"}],
+    }
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "RapidXLocalTTS/1.0"
 
@@ -56,6 +63,10 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         started = time.time()
         status = 200
+        if self.path == "/v1/models":
+            self._json(200, model_list())
+            log({"method": "GET", "path": self.path, "status": status, "duration_ms": round((time.time() - started) * 1000, 2)})
+            return
         if self.path != "/health":
             status = 404
             self._json(404, {"ok": False, "error": "not_found"})

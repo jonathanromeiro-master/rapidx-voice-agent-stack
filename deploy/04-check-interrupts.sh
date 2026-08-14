@@ -4,7 +4,8 @@
 # workflow setting that defaults to FALSE in a fresh draft. No amount of audio
 # pipeline tuning fixes it.
 . "$(dirname "$0")/_common.sh"
-: "${WORKFLOW_ID:?Set WORKFLOW_ID in .env (printed by 03-configure.sh)}"
+WORKFLOW_ID="${WORKFLOW_ID:-${DOGRAH_WORKFLOW_ID:-}}"
+: "${WORKFLOW_ID:?Set DOGRAH_WORKFLOW_ID in .env (printed by 03-configure.sh)}"
 
 TOK=$(dograh_token); export TOK
 
