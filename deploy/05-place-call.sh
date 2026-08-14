@@ -8,8 +8,31 @@
 TARGET="${1:-${TEST_NUMBER:-}}"
 [ -n "$TARGET" ] || die "Usage: bash deploy/05-place-call.sh +5511999999999"
 
-say "Placing a REAL call to $TARGET. This is billable."
-read -r -p "Continue? [y/N] " a; [ "$a" = "y" ] || exit 1
+case "${TELEPHONY_PROVIDER:-brdid_asterisk}" in
+  brdid_asterisk)
+    : "${ASTERISK_ARI_ENDPOINT_TEMPLATE:?Set ASTERISK_ARI_ENDPOINT_TEMPLATE in .env}"
+    DIAL_TARGET=$(TARGET="$TARGET" python3 - <<'PY'
+import os
+number=os.environ["TARGET"]
+if not number.startswith("+") or not number[1:].isdigit():
+    raise SystemExit("TEST_NUMBER must be E.164")
+endpoint=os.environ["ASTERISK_ARI_ENDPOINT_TEMPLATE"]
+if "{number}" not in endpoint and "{e164}" not in endpoint:
+    raise SystemExit("ASTERISK_ARI_ENDPOINT_TEMPLATE must include {number} or {e164}")
+endpoint=endpoint.replace("{number}", number[1:]).replace("{e164}", number)
+if not endpoint.startswith(("PJSIP/", "SIP/")):
+    raise SystemExit("ASTERISK_ARI_ENDPOINT_TEMPLATE must render PJSIP/... or SIP/...")
+print(endpoint)
+PY
+)
+    ;;
+  *) DIAL_TARGET="$TARGET" ;;
+esac
+export DIAL_TARGET
+
+say "Placing one REAL, billable call to $TARGET."
+read -r -p "Type the exact target number to authorize this call: " a
+[ "$a" = "$TARGET" ] || die "Call not authorized"
 
 TOK=$(dograh_token); export TOK
 api POST /api/v1/telephony/initiate-call "$(python3 - <<PY
@@ -18,7 +41,7 @@ print(json.dumps({
   "workflow_id": int(os.environ["WORKFLOW_ID"]),
   "telephony_configuration_id": int(os.environ["TELEPHONY_CONFIG_ID"]),
   "from_phone_number_id": int(os.environ["PHONE_NUMBER_ID"]),
-  "phone_number": "$TARGET",
+  "phone_number": os.environ["DIAL_TARGET"],
 }))
 PY
 )"

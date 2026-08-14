@@ -1,13 +1,18 @@
 # Migration: Telnyx to BR DID
 
-## Current
+## Estado da implementação
 
 ```text
 App / scripts
 -> Dograh
--> Telnyx
+-> configuração ARI
+-> Asterisk
+-> PJSIP
+-> BR DID
 -> PSTN
 ```
+
+O adapter `brdid_asterisk`, o build ARM64 do Asterisk e os scripts de deploy já existem. O diagrama só se torna operacional depois de preencher SIP/ARI, criar a configuração no Dograh e validar uma chamada controlada; Telnyx permanece como rollback.
 
 ## Target
 
@@ -72,12 +77,12 @@ LOCAL_TTS_VOICE=
 
 ## Estratégia
 
-1. preservar o caminho Telnyx
-2. introduzir abstração explícita de telefonia
-3. adicionar provider BR DID + Asterisk
-4. validar com chamadas controladas
-5. inverter default para BR DID
-6. manter rollback por flag
+1. preservar o caminho Telnyx como rollback
+2. manter a abstração de telefonia já presente no registry
+3. usar o provider BR DID + Asterisk já implementado
+4. validar com chamadas controladas após receber as credenciais
+5. manter `brdid_asterisk` como default de ambiente
+6. conservar rollback por flag
 
 ## Rollback
 
@@ -101,19 +106,12 @@ Regra: nenhuma mudança irreversível de banco ou workflow deve impedir esse rol
 ## Riscos principais
 
 - o dashboard hoje assume muito do produto multi-tenant
-- o repositório ainda não tem Asterisk como dependência explícita
+- Asterisk já é uma dependência explícita em `services/asterisk` e `deploy/07-deploy-asterisk.sh`; o container não deve iniciar sem as credenciais SIP/ARI
 - BR DID depende de detalhes de credencial ainda não recebidos
 - speech local pode alterar latência e turn-taking
 
 ## Ordem de mudanças
 
-1. docs e ADRs
-2. VPS audit
-3. abstração de provider
-4. Asterisk ARI
-5. BR DID config
-6. STT local
-7. TTS local
-8. state machine/cadência
-9. testes controlados
-10. piloto
+1. concluído no repositório: docs, registry, deploy Asterisk, speech local e defaults
+2. pendente de credenciais: configuração Dograh, registro SIP e ARI
+3. pendente de aprovação explícita: testes controlados, piloto e qualquer chamada PSTN

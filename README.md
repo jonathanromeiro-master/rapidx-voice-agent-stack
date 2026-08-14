@@ -16,9 +16,9 @@ O objetivo desta fase é migrar essa base, sem reescrita desnecessária, para o 
 - Repositório real: `rapidx-voice-agent-stack/`
 - Linguagens: JavaScript/Node.js, Bash, Python, JSON
 - Orquestrador de voz: Dograh
-- Telefonia atual no repositório: Vobiz legado e Telnyx via Dograh
-- STT atual no repositório: Deepgram
-- TTS atual no repositório: Rumik
+- Telefonia implementada: `brdid_asterisk` via Dograh/Asterisk ARI; VoBiz e Telnyx permanecem legados/fallback
+- STT implementado: `local_whisper` OpenAI-compatible, com Deepgram como fallback
+- TTS implementado: `local_piper` OpenAI-compatible, com Rumik como fallback
 - LLM atual no repositório: Groq, com Gemini no dashboard
 - Dashboard atual: produto Node.js multi-tenant com billing, suporte, admin e demos
 - Workflows atuais: demos branded, não fluxo comercial outbound da Wayno
@@ -39,6 +39,34 @@ O objetivo desta fase é migrar essa base, sem reescrita desnecessária, para o 
 - Rumik sai do caminho principal
 - o fluxo comercial muda de demo/reception para prospecção outbound com cadência e pré-qualificação
 - o escopo do produto deixa de mirar SaaS multi-tenant e passa a priorizar operação interna single-tenant
+
+## Estado atual da implementação desta migração
+
+Em 13 de agosto de 2026, o repositório já tem:
+
+- registry de providers com:
+  - `brdid_asterisk`
+  - `telnyx`
+  - `vobiz`
+  - `local_whisper`
+  - `deepgram`
+  - `local_piper`
+  - `rumik`
+- defaults locais apontando para:
+  - `TELEPHONY_PROVIDER=brdid_asterisk`
+  - `STT_PROVIDER=local_whisper`
+  - `TTS_PROVIDER=local_piper`
+- `deploy/02-deploy-local-speech.sh` para subir proxies locais privados de STT e TTS
+- `deploy/03-configure.sh` capaz de montar o pipeline BYOK com:
+  - `speaches` + `base_url` para STT local
+  - `openai` + `base_url` para TTS local
+  - `groq` ou `google` para LLM
+
+O que ainda nao esta comprovado pelo repositório sozinho:
+
+- qualidade de `whisper.cpp` e Piper em PSTN
+- registro SIP BR DID funcional no Asterisk
+- chamada de ponta a ponta BR DID -> Asterisk -> Dograh -> STT local -> LLM -> TTS local
 
 ## Documentação desta migração
 

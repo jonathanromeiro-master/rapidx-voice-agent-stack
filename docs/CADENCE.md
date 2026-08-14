@@ -94,3 +94,16 @@ MAX_CONCURRENT_CALLS=1
 ```
 
 Escalonar só após validação.
+
+## Runtime implemented
+
+The Studio stores tenant-scoped prospects and attempts. It does not schedule or
+place calls automatically.
+
+- `POST /api/prospects` requires an E.164 number, purpose, legal basis, and IANA timezone.
+- `POST /api/prospects/attempts` requires an idempotency key. Technical failures also require a reason.
+- `GET /api/prospects` and `GET /api/cadence/status` are resolved from the authenticated tenant session.
+- Three consecutive technical failures open the per-tenant circuit breaker. The guarded paid-call endpoint returns `409 circuit_open` before contacting Dograh or a carrier.
+
+Prospect rows, attempts, and audit events carry the tenant identity server side.
+The browser cannot select a different tenant by sending an ID.

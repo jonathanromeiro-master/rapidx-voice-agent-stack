@@ -68,6 +68,18 @@ test('agency OS APIs complete the lifecycle and preserve tenant isolation', { ti
       TEST_USER_TENANT: 'RapidX Agency QA',
       TEST_USER_SUPER_ADMIN: 'true',
       PUBLIC_ORIGIN: baseUrl,
+      DOGRAH_BASE_URL: 'https://dograh.invalid/api/v1',
+      DOGRAH_API_KEY: '',
+      ASTERISK_ARI_URL: 'http://127.0.0.1:8088/ari',
+      ASTERISK_ARI_USERNAME: '',
+      ASTERISK_ARI_PASSWORD: '',
+      ASTERISK_ARI_APP: '',
+      BRDID_SIP_SERVER: '',
+      BRDID_SIP_USERNAME: '',
+      BRDID_SIP_PASSWORD: '',
+      BRDID_CALLER_ID: '',
+      LOCAL_STT_BASE_URL: '',
+      LOCAL_TTS_BASE_URL: '',
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
@@ -86,6 +98,21 @@ test('agency OS APIs complete the lifecycle and preserve tenant isolation', { ti
   });
 
   await waitForServer(baseUrl, child, () => logs.join(''));
+
+  const dependencies = await fetch(`${baseUrl}/api/health/dependencies`);
+  const dependencyHealth = await dependencies.json();
+  assert.equal(dependencies.status, 200);
+  assert.equal(dependencyHealth.ok, true);
+  assert.equal(dependencyHealth.dependencies.database.status, 'healthy');
+  assert.equal(dependencyHealth.dependencies.queue.status, 'disabled');
+  assert.equal(dependencyHealth.dependencies.orchestrator.status, 'not_configured');
+  assert.equal(dependencyHealth.dependencies.asterisk.status, 'not_configured');
+  assert.equal(dependencyHealth.dependencies.sip.status, 'not_configured');
+  assert.equal(dependencyHealth.dependencies.stt.status, 'not_configured');
+  assert.equal(dependencyHealth.dependencies.tts.status, 'not_configured');
+
+  const emptyObservability = await request('', '/api/observability');
+  assert.equal(emptyObservability.response.status, 401);
 
   const legacyConsole = await fetch(`${baseUrl}/console.html`, { redirect: 'manual' });
   assert.equal(legacyConsole.status, 302);
@@ -124,6 +151,20 @@ test('agency OS APIs complete the lifecycle and preserve tenant isolation', { ti
   const admin = await login(ADMIN_EMAIL, ADMIN_PASSWORD);
   assert.equal(admin.user.role, 'super_admin');
   assert.equal(admin.tenant.name, 'RapidX Agency QA');
+
+  const observability = await request(admin.cookie, '/api/observability');
+  assert.equal(observability.response.status, 200, observability.json.error);
+  assert.equal(observability.json.source, 'tenant_prospect_attempts');
+  assert.equal(observability.json.metrics.prospects, 0);
+  assert.equal(observability.json.metrics.dials, 0);
+  assert.equal(observability.json.carrierCdr, 'not_recorded');
+
+  const unconfirmedDial = await request(admin.cookie, '/api/telephony/dial', {
+    method: 'POST',
+    body: { number: '+5511999999999', confirmation: '+5511888888888' },
+  });
+  assert.equal(unconfirmedDial.response.status, 400);
+  assert.equal(unconfirmedDial.json.code, 'needs_confirm');
 
   const rejectedSocketStatus = await new Promise((resolve, reject) => {
     const ws = new WebSocket(`ws://127.0.0.1:${port}/api/stt/stream`, {
@@ -352,6 +393,75 @@ test('agency OS APIs complete the lifecycle and preserve tenant isolation', { ti
   assert.equal(client.user.role, 'owner');
   assert.equal(client.tenant.id, clientTenantId);
 
+  const impersonation = await request(admin.cookie, '/api/admin/impersonations', {
+    method: 'POST',
+    body: { userId: client.user.id, reason: 'Verify read-only support controls', password: ADMIN_PASSWORD },
+  });
+  assert.equal(impersonation.response.status, 200, impersonation.json.error);
+  const impersonatedCookie = impersonation.response.headers.get('set-cookie').split(';')[0];
+  const impersonatedDial = await request(impersonatedCookie, '/api/telephony/dial', {
+    method: 'POST',
+    body: { number: '+5565999999999', confirmation: '+5565999999999' },
+  });
+  assert.equal(impersonatedDial.response.status, 403);
+  assert.equal(impersonatedDial.json.code, 'impersonation_read_only');
+
+  const prospectCreated = await request(admin.cookie, '/api/prospects', {
+    method: 'POST',
+    body: {
+      companyName: 'Cuiaba Solar', phoneNumber: '+5565999999999', purpose: 'Consent-safe solar pilot',
+      legalBasis: 'Documented legitimate interest', timezone: 'America/Cuiaba',
+    },
+  });
+  assert.equal(prospectCreated.response.status, 201, prospectCreated.json.error);
+  const prospectId = prospectCreated.json.prospect.id;
+
+  const clientProspects = await request(client.cookie, '/api/prospects');
+  assert.equal(clientProspects.response.status, 200, clientProspects.json.error);
+  assert.deepEqual(clientProspects.json.prospects, []);
+
+  const clientObservability = await request(client.cookie, '/api/observability');
+  assert.equal(clientObservability.response.status, 200, clientObservability.json.error);
+  assert.equal(clientObservability.json.metrics.prospects, 0);
+  assert.equal(clientObservability.json.metrics.dials, 0);
+
+  const crossTenantAttempt = await request(client.cookie, '/api/prospects/attempts', {
+    method: 'POST',
+    body: { prospectId, outcome: 'NO_ANSWER', idempotencyKey: 'cross-tenant-0001' },
+  });
+  assert.equal(crossTenantAttempt.response.status, 404);
+  assert.equal(crossTenantAttempt.json.code, 'not_found');
+
+  for (const [index, key] of ['technical-attempt-0001', 'technical-attempt-0002', 'technical-attempt-0003'].entries()) {
+    const technicalAttempt = await request(admin.cookie, '/api/prospects/attempts', {
+      method: 'POST',
+      body: { prospectId, outcome: 'TECHNICAL_FAILURE', technicalReason: 'carrier timeout', idempotencyKey: key },
+    });
+    assert.equal(technicalAttempt.response.status, 201, technicalAttempt.json.error);
+    if (index === 0) {
+      const duplicateAttempt = await request(admin.cookie, '/api/prospects/attempts', {
+        method: 'POST',
+        body: { prospectId, outcome: 'TECHNICAL_FAILURE', technicalReason: 'carrier timeout', idempotencyKey: key },
+      });
+      assert.equal(duplicateAttempt.response.status, 200, duplicateAttempt.json.error);
+      assert.equal(duplicateAttempt.json.duplicate, true);
+    }
+  }
+  const cadenceStatus = await request(admin.cookie, '/api/cadence/status');
+  assert.equal(cadenceStatus.response.status, 200, cadenceStatus.json.error);
+  assert.equal(cadenceStatus.json.breaker.open, true);
+  const adminObservability = await request(admin.cookie, '/api/observability');
+  assert.equal(adminObservability.response.status, 200, adminObservability.json.error);
+  assert.equal(adminObservability.json.metrics.prospects, 1);
+  assert.equal(adminObservability.json.metrics.technicalFailures, 3);
+  assert.equal(cadenceStatus.json.policy.autoDial, false);
+  const breakerBlockedDial = await request(admin.cookie, '/api/telephony/dial', {
+    method: 'POST',
+    body: { number: '+5565999999999', confirmation: '+5565999999999' },
+  });
+  assert.equal(breakerBlockedDial.response.status, 409);
+  assert.equal(breakerBlockedDial.json.code, 'circuit_open');
+
   const clientInvoices = await request(client.cookie, '/api/invoices');
   assert.equal(clientInvoices.response.status, 200, clientInvoices.json.error);
   assert.deepEqual(clientInvoices.json.invoices.map((row) => row.id), [clientInvoiceId]);
@@ -451,5 +561,8 @@ test('agency OS APIs complete the lifecycle and preserve tenant isolation', { ti
   assert.ok(persisted.clientActivities.some((row) => row.id === approached.json.activity.id));
   assert.equal(persisted.integrationRequests.length, 2);
   assert.equal(persisted.agencyPrompts.length, 2);
-  assert.equal((await stat(dbFile)).mode & 0o777, 0o600);
+  assert.equal(persisted.prospects.length, 1);
+  assert.equal(persisted.prospectAttempts.length, 3);
+  // Windows does not expose POSIX chmod bits through stat.mode.
+  if (process.platform !== 'win32') assert.equal((await stat(dbFile)).mode & 0o777, 0o600);
 });

@@ -4,32 +4,32 @@
 
 say "Building the Rumik overlay image"
 
-BASE_IMG=$(rsh "docker ps --format '{{.Image}}' | grep -i dograh-api | head -1")
+BASE_IMG=$(rsh "sudo -n docker ps --format '{{.Image}}' | grep -i dograh-api | head -1")
 [ -n "$BASE_IMG" ] || die "Could not find the running dograh-api image"
 ok "Base image: $BASE_IMG"
 
-rsh "mkdir -p /opt/rumik-overlay"
+rsh "sudo -n install -d -m 0755 /opt/rumik-overlay"
 OVERLAY="$ROOT/rumik-overlay-local"
 [ -f "$OVERLAY/registry.py" ] || die "Missing $OVERLAY/registry.py"
 [ -f "$OVERLAY/service_factory.py" ] || die "Missing $OVERLAY/service_factory.py"
 [ -f "$OVERLAY/check_validity.py" ] || die "Missing $OVERLAY/check_validity.py"
 
 sed "s|^FROM .*|FROM $BASE_IMG|" "$OVERLAY/Dockerfile" \
-  | rsh "cat > /opt/rumik-overlay/Dockerfile"
+  | rsh "sudo -n tee /opt/rumik-overlay/Dockerfile >/dev/null"
 
 say "Uploading the verified Rumik registry and service patches"
 for file in registry.py service_factory.py check_validity.py; do
-  rsh "cat > /opt/rumik-overlay/$file" < "$OVERLAY/$file"
+  rsh "sudo -n tee /opt/rumik-overlay/$file >/dev/null" < "$OVERLAY/$file"
 done
 
 say "Building (pip install uses --no-deps, see docs/RUMIK-OVERLAY.md for why)"
-rsh "cd /opt/rumik-overlay && docker build -t local/dograh-api:rumik-v1 ."
+rsh "cd /opt/rumik-overlay && sudo -n docker build -t local/dograh-api:rumik-v1 ."
 
 say "Pointing the compose stack at the new image"
-rsh "cd /opt/dograh-hq/dograh && printf 'services:\n  api:\n    image: local/dograh-api:rumik-v1\n    pull_policy: never\n' > docker-compose.override.yaml && docker compose up -d api"
+rsh "cd /opt/dograh-hq/dograh && printf 'services:\n  api:\n    image: local/dograh-api:rumik-v1\n    pull_policy: never\n' | sudo -n tee docker-compose.override.yaml >/dev/null && sudo -n docker compose up -d api"
 
 sleep 20
-rsh "docker ps --format '{{.Names}}\t{{.Status}}' | grep api"
+rsh "sudo -n docker ps --format '{{.Names}}\t{{.Status}}' | grep api"
 
 say "Verifying Rumik is registered"
 TOK=$(dograh_token)

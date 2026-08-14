@@ -1,42 +1,24 @@
-# What a minute actually costs
+# AI runtime pricing boundary
 
-Measured on the reference deployment, mid 2026, at roughly 85 INR to 1 USD.
-Assumes the agent speaks for about half of each minute, which is typical for a
-receptionist that keeps turns to one or two sentences.
+## Public claim
 
-| Layer | Provider | Rate | Per minute |
-|---|---|---|---|
-| Telephony | Vobiz | ~0.70 INR/min | 0.70 INR |
-| Speech to text | Deepgram nova-3 | $0.0077/min | 0.50 INR |
-| Brain | Groq llama-3.3-70b | per token | ~0.12 INR |
-| Voice | Rumik mulberry, promo | 0.50 INR/1k chars | ~0.25 INR |
-| **Total, promo** | | | **~1.6 INR/min** |
-| Voice | Rumik mulberry, permanent | 2.50 INR/1k chars | ~1.25 INR |
-| **Total, permanent** | | | **~2.6 INR/min** |
+The allowed claim is: "AI runtime from about ₹1 per minute."
 
-Fixed costs: a Vobiz number is 500 INR/month, and the VPS is about $6 to $12/month
-depending on size.
+It covers only STT, LLM, and TTS. It never includes telephony, DID/SIP,
+carrier, server, tax, or other external costs. Do not publish a different
+all-in rate without a dated, provider-backed calculation for the deployed
+configuration.
 
-## Against the usual stack
+## Current metering
 
-An ElevenLabs plus Twilio plus GPT-4 setup lands around 15 to 20 INR/min. Nearly
-all of the gap is the voice: ElevenLabs v3 is roughly 10,000 INR per million
-characters against Rumik mulberry at 500 INR promo and 2,500 INR permanent, so
-20x cheaper on promo and 4x permanent.
+The dashboard records TTS characters, approximate LLM tokens, and dial counts.
+It does not yet record call duration or provider invoices, so it deliberately
+reports AI-runtime spend as `not_metered`. A dial count must never be converted
+into an AI-runtime or carrier cost estimate.
 
-## Margin at real volume
+## Before quoting a measured rate
 
-At 3,500 minutes/month against a 40,000 INR/month retainer:
-
-| | Promo | Permanent |
-|---|---|---|
-| COGS | ~5,600 INR | ~9,100 INR |
-| Gross margin | 86% | 78% |
-
-## Claim discipline
-
-"AI voice agents from 1 rupee a minute" is defensible: the AI layer alone
-(STT + brain + voice) is about 0.90 INR/min on promo rates.
-
-Do NOT claim 1 rupee a minute all-in. With carrier minutes it is 1.6 to 2.6
-INR/min, and anyone who checks will find that immediately.
+1. Capture real session duration plus provider invoices for STT, LLM, and TTS.
+2. Reconcile those figures for the selected provider configuration and date.
+3. Keep the public AI-runtime figure separate from the carrier invoice and all
+   fixed infrastructure costs.

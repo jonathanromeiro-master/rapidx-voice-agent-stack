@@ -2,10 +2,10 @@
  * RapidX Voice. Provider-agnostic engine.
  *
  * Four registries, each a uniform set of implemented adapters:
- *   stt        : deepgram, intentionally fixed
- *   tts        : rumik
+ *   stt        : deepgram or local whisper
+ *   tts        : rumik or local piper
  *   llm        : groq + gemini
- *   telephony  : vobiz or telnyx via Dograh
+ *   telephony  : brdid_asterisk, telnyx, or vobiz
  *
  * Every adapter declares { id, label, needs:[envKeys], ... }. `live` means the
  * adapter is implemented and configured, never merely that a key exists.
@@ -14,14 +14,15 @@
  * in process.env and can never be supplied through a tenant request.
  *
  * Deepgram handles streaming and batch transcription, Rumik keeps the verified
- * browser UA, Groq handles the primary reasoning path, and
- * outbound carrier calls always go through Dograh. Never call provider APIs directly.
+ * browser UA, Groq handles the primary reasoning path, and telephony can route
+ * either through Dograh or a local Asterisk ARI bridge. Never call provider APIs
+ * directly from tenant input.
  *
  * No em dashes anywhere. Commas and periods only.
  */
 'use strict';
 
-const { httpsPost, httpsGet } = require('./core');
+const { requestUrl, httpsPost, httpsGet } = require('./core');
 
 // Rumik sits behind Cloudflare, which 403s non-browser user-agents. NEVER remove.
 const BROWSER_UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36';
@@ -89,6 +90,40 @@ function selectedModel(adapter, requestedModel) {
   return model;
 }
 
+function baseUrlFromEnv(name, label) {
+  const raw = String(process.env[name] || '').trim();
+  if (!raw) throw notConfigured(label, [name]);
+  let parsed;
+  try { parsed = new URL(raw); } catch {
+    throw new ProviderError(`${name} is invalid`, 503, 'not_configured');
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    throw new ProviderError(`${name} must use http or https`, 503, 'not_configured');
+  }
+  return parsed.toString().replace(/\/$/, '');
+}
+
+function formMultipart(parts) {
+  const boundary = '----rapidx' + Math.random().toString(16).slice(2);
+  const chunks = [];
+  for (const part of parts) {
+    chunks.push(Buffer.from(`--${boundary}\r\n`));
+    let disposition = `Content-Disposition: form-data; name="${part.name}"`;
+    if (part.filename) disposition += `; filename="${part.filename}"`;
+    chunks.push(Buffer.from(disposition + '\r\n'));
+    if (part.type) chunks.push(Buffer.from(`Content-Type: ${part.type}\r\n`));
+    chunks.push(Buffer.from('\r\n'));
+    chunks.push(Buffer.isBuffer(part.value) ? part.value : Buffer.from(String(part.value)));
+    chunks.push(Buffer.from('\r\n'));
+  }
+  chunks.push(Buffer.from(`--${boundary}--\r\n`));
+  return { boundary, body: Buffer.concat(chunks) };
+}
+
+function basicAuthHeader(user, pass) {
+  return `Basic ${Buffer.from(`${user}:${pass}`).toString('base64')}`;
+}
+
 /* ==========================================================================
    TTS LAYER
    ========================================================================== */
@@ -97,6 +132,7 @@ const ttsRumik = {
   id: 'rumik',
   label: 'Rumik Silk',
   layer: 'tts',
+  streaming: true,
   needs: ['RUMIK_API_KEY'],
   implemented: true,
   models: TTS_MODELS,
@@ -170,8 +206,49 @@ const ttsRumik = {
   },
 };
 
+const ttsLocalPiper = {
+  id: 'local_piper',
+  label: 'Local Piper',
+  layer: 'tts',
+  streaming: false,
+  needs: ['LOCAL_TTS_BASE_URL'],
+  implemented: true,
+  get live() { return hasEnv(this.needs); },
+  get model() { return process.env.LOCAL_TTS_MODEL || 'piper'; },
+
+  async synthesize(opts) {
+    const baseUrl = baseUrlFromEnv('LOCAL_TTS_BASE_URL', this.label);
+    const text = String(opts.text || '').slice(0, MAX_TEXT);
+    if (!text.trim()) throw new ProviderError('text is required', 422, 'no_text');
+    const payload = Buffer.from(JSON.stringify({
+      model: selectedModel(this, opts.model),
+      input: text,
+      voice: String(process.env.LOCAL_TTS_VOICE || opts.voice || 'pt_BR-faber-medium').trim(),
+      response_format: 'wav',
+    }));
+    const up = await requestUrl(`${baseUrl}/v1/audio/speech`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Content-Length': String(payload.length),
+      },
+      body: payload,
+      timeoutMs: 60000,
+    });
+    if (up.status !== 200) {
+      throw new ProviderError('local piper synthesis failed', up.status, 'upstream',
+        up.buffer.toString('utf8').slice(0, 300));
+    }
+    return { buffer: up.buffer, chars: text.length };
+  },
+
+  async wsConnect() {
+    throw new ProviderError('Local Piper does not support websocket streaming mint', 501, 'streaming_not_supported');
+  },
+};
+
 /* ==========================================================================
-   LLM LAYER. Speech recognition intentionally remains Deepgram only.
+   LLM LAYER
    ========================================================================== */
 
 const DEFAULT_SYSTEM = 'You are RapidX, a warm, concise voice assistant. Reply in 1 to 3 short spoken sentences. No markdown, no lists, no emojis. This will be read aloud.';
@@ -594,6 +671,167 @@ const telTelnyx = {
   },
 };
 
+const sttLocalWhisper = {
+  id: 'local_whisper',
+  label: 'Local Whisper',
+  layer: 'stt',
+  needs: ['LOCAL_STT_BASE_URL'],
+  implemented: true,
+  get live() { return hasEnv(this.needs); },
+  get model() { return process.env.LOCAL_STT_MODEL || 'small'; },
+
+  async mintToken() {
+    if (!hasEnv(this.needs)) throw notConfigured(this.label, this.needs);
+    return {
+      access_token: 'local-openai-compatible',
+      expires_in: 60,
+      model: selectedModel(this),
+      base_url: baseUrlFromEnv('LOCAL_STT_BASE_URL', this.label),
+    };
+  },
+
+  async transcribe(opts) {
+    const baseUrl = baseUrlFromEnv('LOCAL_STT_BASE_URL', this.label);
+    const audio = Buffer.from(String(opts.audio || ''), 'base64');
+    if (audio.length < 200) throw new ProviderError('no audio', 422, 'no_audio');
+    const mime = String(opts.mime || 'audio/webm').split(';')[0];
+    const started = Date.now();
+    const multipart = formMultipart([
+      { name: 'file', filename: 'audio.webm', type: mime, value: audio },
+      { name: 'model', value: selectedModel(this, opts.model) },
+      { name: 'language', value: String(process.env.LOCAL_STT_LANGUAGE || 'pt').trim() || 'pt' },
+    ]);
+    const up = await requestUrl(`${baseUrl}/v1/audio/transcriptions`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': `multipart/form-data; boundary=${multipart.boundary}`,
+        'Content-Length': String(multipart.body.length),
+      },
+      body: multipart.body,
+      timeoutMs: 60000,
+    });
+    let data = {};
+    try { data = JSON.parse(up.buffer.toString('utf8')); } catch {}
+    if (up.status !== 200) {
+      throw new ProviderError('local whisper transcription failed', up.status, 'upstream',
+        (data.error || up.buffer.toString('utf8')).slice(0, 300));
+    }
+    return {
+      text: String(data.text || data.transcript || '').trim(),
+      provider: 'local_whisper',
+      model: selectedModel(this, opts.model),
+      latency_ms: Date.now() - started,
+    };
+  },
+};
+
+const telBrDidAsterisk = {
+  id: 'brdid_asterisk',
+  label: 'BR DID via Asterisk ARI',
+  layer: 'telephony',
+  needs: [
+    'ASTERISK_ARI_URL', 'ASTERISK_ARI_USERNAME', 'ASTERISK_ARI_PASSWORD', 'ASTERISK_ARI_APP',
+    'BRDID_SIP_SERVER', 'BRDID_SIP_USERNAME', 'BRDID_SIP_PASSWORD', 'BRDID_CALLER_ID',
+    'DOGRAH_BASE_URL', 'DOGRAH_API_KEY', 'DOGRAH_WORKFLOW_ID',
+    'DOGRAH_TELEPHONY_CONFIG_ID', 'DOGRAH_PHONE_NUMBER_ID',
+  ],
+  implemented: true,
+  get live() { return hasEnv(this.needs); },
+  get did() { return String(process.env.BRDID_CALLER_ID || '').replace(/[^0-9+]/g, ''); },
+  get dashboard() { return ''; },
+
+  async ariRequest(method, pathname, payload) {
+    if (!hasEnv(this.needs)) throw notConfigured(this.label, this.needs);
+    const baseUrl = baseUrlFromEnv('ASTERISK_ARI_URL', this.label);
+    const headers = {
+      'Authorization': basicAuthHeader(process.env.ASTERISK_ARI_USERNAME, process.env.ASTERISK_ARI_PASSWORD),
+    };
+    const options = { method, headers, timeoutMs: 20000 };
+    if (payload) {
+      const body = Buffer.from(JSON.stringify(payload));
+      headers['Content-Type'] = 'application/json';
+      headers['Content-Length'] = String(body.length);
+      options.body = body;
+    }
+    const up = await requestUrl(`${baseUrl}${pathname}`, options);
+    return { up, data: parseJsonResponse(up) };
+  },
+
+  async status() {
+    const infoResult = await this.ariRequest('GET', '/asterisk/info');
+    if (infoResult.up.status < 200 || infoResult.up.status >= 300) {
+      throw new ProviderError('Could not read Asterisk ARI status', upstreamStatus(infoResult.up.status),
+        'upstream', upstreamMessage(infoResult.data, 'Asterisk ARI info failed.'));
+    }
+    const endpointId = String(process.env.ASTERISK_SIP_ENDPOINT_ID || process.env.BRDID_SIP_USERNAME || '').trim();
+    let endpoint = null;
+    let sipRegistration = 'unknown';
+    if (endpointId) {
+      const endpointResult = await this.ariRequest('GET', `/endpoints/PJSIP/${encodeURIComponent(endpointId)}`);
+      if (endpointResult.up.status === 200) {
+        endpoint = endpointResult.data;
+        sipRegistration = String(endpoint.state || endpoint.device_state || 'unknown').toLowerCase();
+      } else if (endpointResult.up.status !== 404) {
+        throw new ProviderError('Could not read BR DID endpoint status from Asterisk', upstreamStatus(endpointResult.up.status),
+          'upstream', upstreamMessage(endpointResult.data, 'Asterisk endpoint status failed.'));
+      }
+    }
+    return {
+      connected: true,
+      provider: 'brdid_asterisk',
+      orchestrator: 'asterisk_ari',
+      ari: {
+        app: String(process.env.ASTERISK_ARI_APP || '').trim(),
+        version: infoResult.data.asterisk_version || infoResult.data.version || '',
+        status: 'connected',
+      },
+      sipRegistration,
+      endpoint: endpoint ? {
+        id: endpoint.resource || endpointId,
+        technology: endpoint.technology || 'PJSIP',
+        state: endpoint.state || endpoint.device_state || 'unknown',
+      } : null,
+      configuration: {
+        trunkHost: String(process.env.BRDID_SIP_SERVER || '').trim(),
+        transport: String(process.env.BRDID_SIP_TRANSPORT || 'udp').trim().toLowerCase(),
+        port: String(process.env.BRDID_SIP_PORT || '5060').trim(),
+      },
+      dids: this.did ? [{ number: this.did, status: sipRegistration, label: 'BR DID caller ID' }] : [],
+      did: this.did,
+      workflowId: String(process.env.DOGRAH_WORKFLOW_ID || '').trim(),
+    };
+  },
+
+  async dial(rawNumber, options = {}) {
+    if (!hasEnv(this.needs)) throw notConfigured(this.label, this.needs);
+    const number = String(rawNumber || '').trim();
+    if (!/^\+[1-9]\d{7,14}$/.test(number)) {
+      throw new ProviderError('need a valid E.164 number, for example +5565999999999', 422, 'bad_number');
+    }
+    const endpointTemplate = String(process.env.ASTERISK_ARI_ENDPOINT_TEMPLATE || '').trim();
+    if (!endpointTemplate.includes('{number}') && !endpointTemplate.includes('{e164}')) {
+      throw new ProviderError('ASTERISK_ARI_ENDPOINT_TEMPLATE must include {number} or {e164}', 503, 'not_configured');
+    }
+    const endpoint = endpointTemplate
+      .replace(/\{number\}/g, number.slice(1))
+      .replace(/\{e164\}/g, number);
+    if (!/^(PJSIP|SIP)\//.test(endpoint)) {
+      throw new ProviderError('ASTERISK_ARI_ENDPOINT_TEMPLATE must render PJSIP/... or SIP/...', 503, 'not_configured');
+    }
+    const result = await telVobiz.request('POST', '/api/v1/telephony/initiate-call', {
+      workflow_id: Number.isInteger(options.workflowId) && options.workflowId > 0 ? options.workflowId : positiveIntEnv('DOGRAH_WORKFLOW_ID'),
+      telephony_configuration_id: positiveIntEnv('DOGRAH_TELEPHONY_CONFIG_ID'),
+      from_phone_number_id: positiveIntEnv('DOGRAH_PHONE_NUMBER_ID'),
+      phone_number: endpoint,
+    });
+    if (result.up.status < 200 || result.up.status >= 300) {
+      throw new ProviderError('Dograh could not initiate the BR DID call', upstreamStatus(result.up.status),
+        'upstream', upstreamMessage(result.data, 'The call was not placed.'));
+    }
+    return { status: result.up.status, data: result.data };
+  },
+};
+
 /* ==========================================================================
    Registries + lookups + describeProviders for GET /api/providers
    ========================================================================== */
@@ -626,16 +864,23 @@ function registerProvider(layer, adapter, options = {}) {
 }
 
 registerProvider('stt', sttDeepgram);
+registerProvider('stt', sttLocalWhisper);
 registerProvider('tts', ttsRumik);
+registerProvider('tts', ttsLocalPiper);
 registerProvider('llm', llmGroq);
 registerProvider('llm', llmGemini);
+registerProvider('telephony', telBrDidAsterisk);
 registerProvider('telephony', telTelnyx);
 registerProvider('telephony', telVobiz);
 
 function configuredDefaultId(layer) {
-  if (layer === 'stt') return 'deepgram';
   const envName = `${layer.toUpperCase()}_PROVIDER`;
-  return String(process.env[envName] || ({ tts: 'rumik', llm: 'groq', telephony: 'telnyx' })[layer] || '').trim().toLowerCase();
+  return String(process.env[envName] || ({
+    stt: 'local_whisper',
+    tts: 'local_piper',
+    llm: 'groq',
+    telephony: 'brdid_asterisk',
+  })[layer] || '').trim().toLowerCase();
 }
 
 function get(layer, id) {
@@ -643,9 +888,6 @@ function get(layer, id) {
     throw new ProviderError(`Unknown provider layer: ${layer}`, 422, 'invalid_provider_layer');
   }
   const providerId = String(id || configuredDefaultId(layer)).trim().toLowerCase();
-  if (layer === 'stt' && providerId !== 'deepgram') {
-    throw new ProviderError('Deepgram is the only supported STT provider', 422, 'stt_provider_fixed');
-  }
   const adapter = registries[layer][providerId];
   if (!adapter) {
     throw new ProviderError(`Unsupported ${layer} provider: ${providerId}`, 422, 'unsupported_provider');
@@ -690,6 +932,7 @@ function describeProviders() {
       live: a.live,
       selected: a.id === configuredDefaultId(layer),
       model: (layer === 'llm' || layer === 'tts' || layer === 'stt') ? selectedModel(a) : undefined,
+      streaming: layer === 'tts' ? Boolean(a.streaming) : undefined,
       needs: a.needs,
     }));
   }

@@ -4,7 +4,7 @@
 
 # RapidX Voice
 
-**Production AI voice agents at roughly one rupee.** A premium, multi-tenant, provider-agnostic voice agent platform. Powered by Rumik silk TTS, about 20x cheaper than ElevenLabs, with a swappable engine so you are never locked into one TTS, LLM, or telephony vendor.
+**Production AI voice agents from about one rupee of AI runtime per minute.** Telephony, DID/SIP, carrier, server, tax, and similar external costs are excluded. The Brazil deployment defaults to local speech and BR DID/Asterisk; Rumik, Deepgram, Telnyx, and VoBiz remain optional fallback adapters.
 
 It runs from one Node service. The product shell is dependency-free browser JavaScript, while the agency analytics island is compiled from React and Recharts into a self-hosted bundle. No CDN runtime is required.
 
@@ -30,24 +30,25 @@ The product is built around strict adapter registries. The LLM and TTS layers ac
 
 | Layer | Implemented today | Selection |
 | --- | --- | --- |
-| **Transcription (STT)** | Deepgram Nova-3, batch and live streaming | Intentionally fixed to Deepgram |
-| **Voice (TTS)** | Rumik silk, Muga and Mulberry | `TTS_PROVIDER`, `TTS_MODEL` |
+| **Transcription (STT)** | Local Whisper through `POST /v1/audio/transcriptions`; Deepgram fallback | `STT_PROVIDER`, `STT_MODEL` |
+| **Voice (TTS)** | Local Piper through `POST /v1/audio/speech`; Rumik fallback | `TTS_PROVIDER`, `TTS_MODEL` |
 | **Brain (LLM)** | Groq and Google Gemini | `LLM_PROVIDER`, `LLM_MODEL` |
-| **Telephony** | VoBiz through Dograh | `TELEPHONY_PROVIDER` |
+| **Telephony** | BR DID through Asterisk ARI and Dograh; Telnyx/VoBiz fallback | `TELEPHONY_PROVIDER` |
 
 `GET /api/providers` reports only adapters that actually ship in this repository. It never labels a placeholder as live. The response includes selected and configured state, model IDs, and required environment variable names, but never secret values.
 
-To add another LLM or TTS vendor, implement the layer methods in `lib/providers.js`, register the adapter with `registerProvider`, and add mocked contract tests. A TTS adapter implements `synthesize` and `wsConnect`. An LLM adapter implements `chat`. STT remains Deepgram-only by product decision.
+To add another LLM or TTS vendor, implement the layer methods in `lib/providers.js`, register the adapter with `registerProvider`, and add mocked contract tests. A TTS adapter implements `synthesize` and may implement `wsConnect`; the local Piper adapter intentionally supports batch synthesis only. An LLM adapter implements `chat`.
 
-Rumik is the only TTS adapter implemented in this repository today. The contract is vendor-neutral, but the Settings screen does not claim that ElevenLabs, Sarvam, or another TTS works until its adapter and tests are shipped.
+Local Piper and Rumik are implemented TTS adapters. The contract is vendor-neutral, but the Settings screen does not claim that ElevenLabs, Sarvam, or another TTS works until its adapter and tests are shipped.
 
 Example server defaults:
 
 ```dotenv
-LLM_PROVIDER=gemini
-LLM_MODEL=gemini-2.5-flash
-TTS_PROVIDER=rumik
-TTS_MODEL=mulberry
+LLM_PROVIDER=groq
+LLM_MODEL=llama-3.3-70b-versatile
+STT_PROVIDER=local_whisper
+TTS_PROVIDER=local_piper
+TTS_MODEL=piper
 ```
 
 Optional `GROQ_ALLOWED_MODELS` and `GEMINI_ALLOWED_MODELS` comma-separated lists restrict model selection. When an allowlist exists, any model outside it is rejected before an upstream request.
@@ -58,7 +59,7 @@ Dograh's published workflow is the authority for both browser WebRTC calls and p
 
 ## The economics
 
-The whole pitch is the price. Rumik silk bills per character at promo rates that land a normal agent reply near **one rupee**, against roughly **twenty rupees** for the same on ElevenLabs. Usage is metered per tenant per day (characters, calls, LLM tokens) and surfaced as an INR cost in the dashboard, so the savings are visible, not a marketing claim.
+The public claim is AI runtime from about one rupee per minute, never an all-in call price. It excludes telephony, DID/SIP, carrier, server, and tax costs. The dashboard records usage units but shows AI-runtime spend as not metered until session duration and provider invoices are reconciled.
 
 ## What you can do in the console
 
@@ -71,7 +72,7 @@ The whole pitch is the price. Rumik silk bills per character at promo rates that
 - **Agents**: build an agent (persona, voice model, speaker, pitch, greeting, assigned phone number) and preview its real voice in one click.
 - **Voice Studio**: type text, pick a model and voice, synthesize a real WAV, see the character count and cost.
 - **Talk to it**: a direct browser voice call through Dograh SmallWebRTC, using the same published workflow and latency path as telephony. The Studio does not render transcript text in this mode.
-- **Telephony**: live VoBiz configuration and number status from Dograh, plus a guarded outbound dial through Dograh.
+- **Telephony**: BR DID/Asterisk status and a guarded outbound dial through Dograh. A live carrier remains unverified until a configured number completes a real call.
 - **SaaS controls**: isolated tenants, roles, presets, INR wallets, support tickets, privacy modes, BYON requests, audit history, and a super-admin workspace.
 - **Billing**: PayU hosted-checkout signing and idempotent callbacks. Keep `PAYU_ENV=test` until the production checklist is complete.
 - **HVAC Desk**: tenant-scoped call outcomes, dispatch routing, CSV export, and optional Cal.com availability and booking.
@@ -79,7 +80,7 @@ The whole pitch is the price. Rumik silk bills per character at promo rates that
 
 ## Security notes
 
-- All provider keys live in `.env`, which is gitignored. **Keys never reach the browser.** The authenticated backend proxies Deepgram live audio, talks to Groq and Rumik, and delegates VoBiz to Dograh.
+- All provider keys live in `.env`, which is gitignored. **Keys never reach the browser.** The browser receives a short-lived Dograh WebRTC session; batch STT/TTS requests are server-proxied and telephony is delegated to Dograh/Asterisk.
 - Passwords are hashed with `crypto.scryptSync` and a per-user random salt. Never stored in plaintext.
 - Sessions are opaque random tokens in an httpOnly cookie, with a 7 day expiry.
 - Strict tenant isolation: every read and write is scoped to the session's tenant. A cross-tenant access returns 403.

@@ -24,6 +24,9 @@ core.loadEnv();
 const providers = require('./lib/providers');
 const payu = require('./lib/payu');
 const demoLinks = require('./lib/demo-links');
+const cadence = require('./lib/cadence');
+const observability = require('./lib/observability');
+const usage = require('./lib/usage');
 
 const PORT = parseInt(process.env.PORT || '8787', 10);
 const DEFAULT_PROVIDERS = Object.freeze({
@@ -528,11 +531,13 @@ async function apiAgentsDelete(req, res, ctx) {
   core.sendJson(res, 200, { ok: true });
 }
 
-// POST /api/tts -> Rumik WAV bytes. Increments tenant usage.chars.
+// POST /api/tts -> selected TTS WAV bytes. Increments tenant usage.chars.
 async function apiTts(req, res, ctx) {
   const b = ctx.body || {};
   try {
-    const selected = providers.resolveSelection('tts', { provider: b.provider, model: b.model });
+    // The Studio's provider is server-selected unless it explicitly chooses one.
+    // This keeps local Piper usable when the legacy Rumik controls are visible.
+    const selected = providers.resolveSelection('tts', b.provider ? { provider: b.provider, model: b.model } : {});
     const out = await selected.adapter.synthesize({
       text: b.text,
       model: selected.model,
@@ -752,23 +757,34 @@ async function apiPublicDemoSession(req, res, token) {
   }
 }
 
-// GET /api/telephony/status -> VoBiz configuration status from Dograh.
+// GET /api/telephony/status -> active telephony provider status.
 async function apiTelephonyStatus(req, res) {
   try {
     const status = await providers.telephony.status();
-    core.sendJson(res, 200, { ...status, provider: 'vobiz', orchestrator: 'dograh' });
+    core.sendJson(res, 200, status);
   } catch (e) {
     handleProviderError(res, e);
   }
 }
 
-// POST /api/telephony/dial -> places a REAL paid call. GUARDED behind confirm.
+// POST /api/telephony/dial -> places a REAL paid call after target-bound confirmation.
 async function apiTelephonyDial(req, res, ctx) {
+  if (rejectImpersonated(res, ctx)) return;
   const b = ctx.body || {};
-  if (b.confirm !== true) {
+  const number = String(b.number || '').trim();
+  const expectedConfirmation = providers.telephony.id === 'vobiz' ? `+91${number}` : number;
+  if (!number || b.confirmation !== expectedConfirmation) {
     return core.sendJson(res, 400, {
-      error: 'confirm required: this places a REAL paid call',
+      error: 'repeat the exact target number to authorize this REAL paid call',
       code: 'needs_confirm',
+    });
+  }
+  const breaker = cadence.circuitBreaker(core.db().prospectAttempts.filter((row) => row.tenantId === ctx.tenant.id));
+  if (breaker.open) {
+    return core.sendJson(res, 409, {
+      error: 'calling is paused after consecutive technical failures',
+      code: 'circuit_open',
+      breaker,
     });
   }
   let workflowId;
@@ -782,7 +798,7 @@ async function apiTelephonyDial(req, res, ctx) {
     }
   }
   try {
-    const r = await providers.telephony.dial(b.number, { workflowId });
+    const r = await providers.telephony.dial(number, { workflowId });
     // Count the dial attempt against today's usage.
     bumpUsage(ctx.tenant.id, 'calls', 1).catch(() => {});
     core.sendJson(res, r.status, r.data);
@@ -791,29 +807,141 @@ async function apiTelephonyDial(req, res, ctx) {
   }
 }
 
-// GET /api/usage -> tenant scoped daily rows + totals, with a rough INR cost.
+const E164_RE = /^\+[1-9]\d{7,14}$/;
+const IDEMPOTENCY_RE = /^[A-Za-z0-9._-]{8,128}$/;
+
+function publicProspect(row) {
+  return {
+    id: row.id, companyName: row.companyName, phoneNumber: row.phoneNumber, purpose: row.purpose,
+    timezone: row.timezone, state: row.state, businessAttempts: row.businessAttempts,
+    technicalAttempts: row.technicalAttempts, lastOutcome: row.lastOutcome,
+    nextAttemptAt: row.nextAttemptAt, callbackAt: row.callbackAt, optedOutAt: row.optedOutAt,
+    createdAt: row.createdAt, updatedAt: row.updatedAt,
+  };
+}
+
+function publicProspectAttempt(row) {
+  return {
+    id: row.id, prospectId: row.prospectId, outcome: row.outcome, technical: row.technical,
+    callbackAt: row.callbackAt, note: row.note, createdAt: row.createdAt,
+  };
+}
+
+function validTimeZone(value) {
+  try { Intl.DateTimeFormat(undefined, { timeZone: value }); return true; } catch (_) { return false; }
+}
+
+function tenantCircuitBreaker(tenantId) {
+  return cadence.circuitBreaker(core.db().prospectAttempts.filter((row) => row.tenantId === tenantId));
+}
+
+function apiProspects(req, res, ctx) {
+  const d = core.db();
+  const prospects = d.prospects
+    .filter((row) => row.tenantId === ctx.tenant.id)
+    .sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)))
+    .map(publicProspect);
+  core.sendJson(res, 200, { prospects, breaker: tenantCircuitBreaker(ctx.tenant.id) });
+}
+
+async function apiProspectCreate(req, res, ctx) {
+  if (rejectImpersonated(res, ctx)) return;
+  const b = ctx.body || {};
+  const companyName = String(b.companyName || '').trim().slice(0, 160);
+  const phoneNumber = String(b.phoneNumber || '').trim();
+  const purpose = String(b.purpose || '').trim().slice(0, 500);
+  const legalBasis = String(b.legalBasis || '').trim().slice(0, 500);
+  const timezone = String(b.timezone || '').trim();
+  if (!companyName || !E164_RE.test(phoneNumber) || !purpose || legalBasis.length < 3 || !validTimeZone(timezone)) {
+    return core.sendJson(res, 422, { error: 'companyName, E.164 phoneNumber, purpose, legalBasis, and IANA timezone are required', code: 'invalid_prospect' });
+  }
+  let prospect;
+  try {
+    await core.mutate((d) => {
+      if (d.prospects.some((row) => row.tenantId === ctx.tenant.id && row.phoneNumber === phoneNumber)) {
+        const error = new Error('a prospect with this phone number already exists'); error.status = 409; error.code = 'duplicate_prospect'; throw error;
+      }
+      const now = new Date().toISOString();
+      prospect = {
+        id: core.genId('pro_'), tenantId: ctx.tenant.id, companyName, phoneNumber, purpose, legalBasis, timezone,
+        state: 'NEW', businessAttempts: 0, technicalAttempts: 0, lastOutcome: null,
+        nextAttemptAt: null, callbackAt: null, optedOutAt: null, createdBy: ctx.user.id, createdAt: now, updatedAt: now,
+      };
+      d.prospects.push(prospect);
+      addAudit(d, ctx, 'prospect.created', 'prospect', prospect.id, { phoneSuffix: phoneNumber.slice(-4) });
+    });
+  } catch (error) {
+    return core.sendJson(res, error.status || 422, { error: error.message || 'invalid prospect', code: error.code || 'invalid_prospect' });
+  }
+  core.sendJson(res, 201, { prospect: publicProspect(prospect) });
+}
+
+async function apiProspectAttempt(req, res, ctx) {
+  if (rejectImpersonated(res, ctx)) return;
+  const b = ctx.body || {};
+  const prospectId = String(b.prospectId || '').trim();
+  const idempotencyKey = String(b.idempotencyKey || '').trim();
+  const outcome = String(b.outcome || '').trim().toUpperCase();
+  const technical = b.technical === true || outcome === 'TECHNICAL_FAILURE';
+  const technicalReason = String(b.technicalReason || '').trim().slice(0, 500);
+  const note = String(b.note || '').trim().slice(0, 2000);
+  if (!prospectId || !IDEMPOTENCY_RE.test(idempotencyKey)) return core.sendJson(res, 422, { error: 'prospectId and a valid idempotencyKey are required', code: 'invalid_attempt' });
+  if (technical && !technicalReason) return core.sendJson(res, 422, { error: 'technicalReason is required for technical failures', code: 'technical_reason_required' });
+
+  let saved;
+  try {
+    await core.mutate((d) => {
+      const duplicate = d.prospectAttempts.find((row) => row.tenantId === ctx.tenant.id && row.idempotencyKey === idempotencyKey);
+      if (duplicate) {
+        const prospect = d.prospects.find((row) => row.id === duplicate.prospectId && row.tenantId === ctx.tenant.id);
+        saved = { prospect, attempt: duplicate, duplicate: true };
+        return;
+      }
+      const prospect = d.prospects.find((row) => row.id === prospectId && row.tenantId === ctx.tenant.id);
+      if (!prospect) { const error = new Error('prospect not found'); error.status = 404; error.code = 'not_found'; throw error; }
+      const result = cadence.recordAttempt(prospect, { outcome, technical, callbackAt: b.callbackAt }, new Date());
+      const attempt = {
+        id: core.genId('pat_'), tenantId: ctx.tenant.id, prospectId: prospect.id, idempotencyKey,
+        outcome: result.outcome, technical: result.technical, technicalReason: result.technical ? technicalReason : null,
+        callbackAt: result.callbackAt, note, createdBy: ctx.user.id, createdAt: prospect.lastAttemptAt,
+      };
+      d.prospectAttempts.push(attempt);
+      addAudit(d, ctx, 'prospect.attempt.recorded', 'prospect', prospect.id, { outcome: attempt.outcome, technical: attempt.technical });
+      saved = { prospect, attempt, duplicate: false };
+    });
+  } catch (error) {
+    return core.sendJson(res, error.status || 422, { error: error.message || 'invalid prospect attempt', code: error.code || 'invalid_attempt' });
+  }
+  core.sendJson(res, saved.duplicate ? 200 : 201, { prospect: publicProspect(saved.prospect), attempt: publicProspectAttempt(saved.attempt), duplicate: saved.duplicate, breaker: tenantCircuitBreaker(ctx.tenant.id) });
+}
+
+function apiCadenceStatus(req, res, ctx) {
+  const prospects = core.db().prospects.filter((row) => row.tenantId === ctx.tenant.id);
+  const states = Object.fromEntries([...cadence.STATES].map((state) => [state, 0]));
+  for (const prospect of prospects) states[prospect.state] = (states[prospect.state] || 0) + 1;
+  core.sendJson(res, 200, {
+    total: prospects.length,
+    states,
+    breaker: tenantCircuitBreaker(ctx.tenant.id),
+    policy: { maxBusinessAttempts: cadence.MAX_BUSINESS_ATTEMPTS, maxConcurrentCalls: 1, autoDial: false },
+  });
+}
+
+// GET /api/observability derives commercial metrics from tenant-owned records.
+// It does not claim carrier CDR, call duration, or speech latency evidence.
+function apiObservability(req, res, ctx) {
+  const d = core.db();
+  const prospects = d.prospects.filter((row) => row.tenantId === ctx.tenant.id);
+  const attempts = d.prospectAttempts.filter((row) => row.tenantId === ctx.tenant.id);
+  core.sendJson(res, 200, observability.summarize(prospects, attempts));
+}
+
+// GET /api/usage -> tenant-scoped usage units. Do not infer AI spend from calls.
 function apiUsage(req, res, ctx) {
   const rows = core.db().usage
     .filter((u) => u.tenantId === ctx.tenant.id)
     .sort((a, b) => (a.day < b.day ? -1 : 1));
-  // Economics estimate for the promotional AI layer. Telephony and other
-  // carrier-inclusive costs are tracked separately and are not implied here.
-  const INR_PER_1K_CHARS = 0.12;
-  const INR_PER_CALL = 0.9;
-  const days = rows.map((r) => ({
-    day: r.day,
-    chars: r.chars || 0,
-    calls: r.calls || 0,
-    llmTokens: r.llmTokens || 0,
-    costInr: Math.round(((r.chars || 0) / 1000 * INR_PER_1K_CHARS + (r.calls || 0) * INR_PER_CALL) * 100) / 100,
-  }));
-  const totals = days.reduce((acc, d) => ({
-    chars: acc.chars + d.chars,
-    calls: acc.calls + d.calls,
-    llmTokens: acc.llmTokens + d.llmTokens,
-    costInr: Math.round((acc.costInr + d.costInr) * 100) / 100,
-  }), { chars: 0, calls: 0, llmTokens: 0, costInr: 0 });
-  core.sendJson(res, 200, { days, totals });
+  core.sendJson(res, 200, usage.summarizeUsage(rows));
 }
 
 function apiPresets(req, res, ctx) {
@@ -1462,6 +1590,66 @@ function apiHealth(req, res) {
   });
 }
 
+function dependencyState(status, extra = {}) {
+  return { status, ...extra };
+}
+
+function configuredEnv(...names) {
+  return names.every((name) => Boolean(String(process.env[name] || '').trim()));
+}
+
+async function localSpeechHealth(envName, provider) {
+  const baseUrl = String(process.env[envName] || '').trim();
+  if (!baseUrl) return dependencyState('not_configured', { provider });
+  let healthUrl;
+  try {
+    healthUrl = new URL('/health', new URL(baseUrl.endsWith('/') ? baseUrl : baseUrl + '/')).toString();
+  } catch (_) {
+    return dependencyState('misconfigured', { provider });
+  }
+  const startedAt = Date.now();
+  try {
+    const upstream = await core.requestUrl(healthUrl, { method: 'GET', timeoutMs: 2500 });
+    return dependencyState(upstream.status >= 200 && upstream.status < 300 ? 'healthy' : 'unhealthy', {
+      provider, httpStatus: upstream.status, latencyMs: Date.now() - startedAt,
+    });
+  } catch (_) {
+    return dependencyState('unreachable', { provider, latencyMs: Date.now() - startedAt });
+  }
+}
+
+// GET /api/health/dependencies only probes loopback/local speech services.
+// Dograh, ARI, SIP, and carriers remain configuration states until an operator
+// explicitly approves their credential validation.
+async function apiDependencyHealth(req, res) {
+  const selected = (layer) => providers.get(layer);
+  const stt = selected('stt');
+  const tts = selected('tts');
+  let database;
+  try {
+    database = dependencyState('healthy', { schemaVersion: core.db().schemaVersion });
+  } catch (_) {
+    database = dependencyState('unhealthy');
+  }
+  const [sttHealth, ttsHealth] = await Promise.all([
+    stt.id === 'local_whisper' ? localSpeechHealth('LOCAL_STT_BASE_URL', stt.id) : Promise.resolve(dependencyState(stt.live ? 'configured' : 'not_configured', { provider: stt.id })),
+    tts.id === 'local_piper' ? localSpeechHealth('LOCAL_TTS_BASE_URL', tts.id) : Promise.resolve(dependencyState(tts.live ? 'configured' : 'not_configured', { provider: tts.id })),
+  ]);
+  const telephony = selected('telephony');
+  const external = (configured, provider) => dependencyState(configured ? 'configured' : 'not_configured', { provider });
+  const dependencies = {
+    database,
+    queue: dependencyState('disabled', { autoDial: false }),
+    orchestrator: external(configuredEnv('DOGRAH_BASE_URL', 'DOGRAH_API_KEY'), 'dograh'),
+    asterisk: external(configuredEnv('ASTERISK_ARI_URL', 'ASTERISK_ARI_USERNAME', 'ASTERISK_ARI_PASSWORD', 'ASTERISK_ARI_APP'), telephony.id),
+    sip: external(configuredEnv('BRDID_SIP_SERVER', 'BRDID_SIP_USERNAME', 'BRDID_SIP_PASSWORD', 'BRDID_CALLER_ID'), telephony.id),
+    stt: sttHealth,
+    tts: ttsHealth,
+  };
+  const unhealthy = Object.values(dependencies).some((dependency) => ['unhealthy', 'unreachable', 'misconfigured'].includes(dependency.status));
+  core.sendJson(res, unhealthy ? 503 : 200, { ok: !unhealthy, dependencies });
+}
+
 /* ==========================================================================
    Map a ProviderError (or anything) to a clean JSON HTTP response.
    ========================================================================== */
@@ -1506,6 +1694,7 @@ const server = http.createServer(async (req, res) => {
 
       // ---- Public GET routes ----
       if (route === '/api/health' && req.method === 'GET') return apiHealth(req, res);
+      if (route === '/api/health/dependencies' && req.method === 'GET') return apiDependencyHealth(req, res);
       if (route === '/api/providers' && req.method === 'GET') return apiProviders(req, res);
       if (route.startsWith('/api/public/demo/') && req.method === 'GET') {
         const token = decodeURIComponent(route.slice('/api/public/demo/'.length));
@@ -1517,6 +1706,9 @@ const server = http.createServer(async (req, res) => {
       if (req.method === 'GET') {
         if (route === '/api/me') return core.requireAuth(req, res, apiMe);
         if (route === '/api/agents') return core.requireAuth(req, res, apiAgentsList);
+        if (route === '/api/prospects') return core.requireAuth(req, res, apiProspects);
+        if (route === '/api/cadence/status') return core.requireAuth(req, res, apiCadenceStatus);
+        if (route === '/api/observability') return core.requireAuth(req, res, apiObservability);
         if (route === '/api/usage') return core.requireAuth(req, res, apiUsage);
         if (route === '/api/telephony/status') return core.requireAuth(req, res, apiTelephonyStatus);
         if (route === '/api/presets') return core.requireAuth(req, res, apiPresets);
@@ -1575,6 +1767,8 @@ const server = http.createServer(async (req, res) => {
       if (route === '/api/agents') return core.requireAuth(req, res, apiAgentsCreate, body);
       if (route === '/api/agents/update') return core.requireAuth(req, res, apiAgentsUpdate, body);
       if (route === '/api/agents/delete') return core.requireAuth(req, res, apiAgentsDelete, body);
+      if (route === '/api/prospects') return core.requireAuth(req, res, apiProspectCreate, body);
+      if (route === '/api/prospects/attempts') return core.requireAuth(req, res, apiProspectAttempt, body);
       if (route === '/api/tts') return core.requireAuth(req, res, apiTts, body);
       if (route === '/api/ws-connect') return core.requireAuth(req, res, apiWsConnect, body);
       if (route === '/api/chat') return core.requireAuth(req, res, apiChat, body);
@@ -1733,12 +1927,16 @@ server.on('error', (e) => {
 boot().then(() => {
   server.listen(PORT, () => {
     const live = providers.describeProviders();
-    const flag = (layer, id) => (live[layer].find((p) => p.id === id) || {}).live ? 'ok' : 'MISSING';
+    const selected = (layer) => live[layer].find((p) => p.selected) || null;
+    const flag = (layer) => {
+      const active = selected(layer);
+      return `${active ? active.id : 'none'} ${active && active.live ? 'ok' : 'MISSING'}`;
+    };
     console.log('\n  RapidX Voice  ready');
     console.log(`  Marketing : http://localhost:${PORT}/`);
     console.log(`  Console   : http://localhost:${PORT}/app.html`);
     if (DEMO_EMAIL) console.log(`  Test login: ${DEMO_EMAIL}`);
-    console.log(`  Providers : deepgram ${flag('stt', 'deepgram')}  groq ${flag('llm', 'groq')}  rumik ${flag('tts', 'rumik')}  vobiz ${flag('telephony', 'vobiz')}\n`);
+    console.log(`  Providers : stt ${flag('stt')}  llm ${flag('llm')}  tts ${flag('tts')}  telephony ${flag('telephony')}\n`);
   });
 }).catch((e) => {
   console.error('  boot failed:', e.message);

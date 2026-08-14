@@ -10,16 +10,18 @@ Precisamos de visibilidade para:
 - banco
 - fila de chamadas
 
-## Endpoints desejados
+## Endpoints implemented
 
-- `/health/orchestrator`
-- `/health/asterisk`
-- `/health/sip`
-- `/health/stt`
-- `/health/tts`
-- `/health/database`
+- `GET /api/health`: dashboard readiness and selected providers
+- `GET /api/health/dependencies`: database, queue, Dograh, ARI, SIP, STT, and TTS
+- `GET /api/observability`: authenticated, tenant-scoped commercial metrics
 
 O caminho final pode mudar, mas a cobertura não.
+
+O endpoint detalhado faz probe HTTP apenas de STT/TTS locais. Dograh, ARI e
+SIP aparecem como `configured` ou `not_configured` até que o operador autorize
+a validação das credenciais. A fila aparece como `disabled` enquanto o auto-dial
+não estiver implementado.
 
 ## Métricas obrigatórias
 
@@ -46,6 +48,15 @@ O caminho final pode mudar, mas a cobertura não.
 - STT_RTF
 - TTS_TTFA
 - end_to_end_turn_latency
+
+## Current metric evidence
+
+`GET /api/observability` derives prospects, recorded commercial attempts,
+contact rates, reach progression, final outcomes, and technical failures from
+the active tenant's prospect and attempt rows. It returns
+`carrierCdr: "not_recorded"`; a recorded attempt is not proof of a carrier dial
+or answer. Duration, STT RTF, TTS TTFA, and end-to-end turn latency remain in
+`unrecorded` until the runtime persists real measurements.
 
 ## Latência por turno
 
@@ -78,3 +89,11 @@ Formato estruturado com:
 - STT timeout
 - TTS timeout
 - answer rate abaixo das faixas esperadas
+
+## Current cadence evidence
+
+`GET /api/cadence/status` reports the active tenant's prospect-state totals and
+the circuit-breaker state. Each attempt is persisted with an idempotency key,
+outcome, timestamp, and technical-failure reason when applicable. This is
+operational metadata only: provider call logs and PSTN results remain external
+evidence until a carrier is configured and a permitted call is made.

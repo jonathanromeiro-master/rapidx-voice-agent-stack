@@ -55,8 +55,6 @@ const State = {
 const VOICE_MODELS = ['mulberry', 'muga'];
 const SPEAKERS = ['speaker_1', 'speaker_2', 'speaker_3', 'speaker_4'];
 const MUGA_TONES = ['neutral', 'happy', 'sad', 'excited', 'angry', 'whisper'];
-/* Rs per 1000 chars. Mulberry promo about Rs 0.50 / 1000. Muga slightly higher. */
-const RATE = { mulberry: 0.50, muga: 0.99 };
 
 /* ===========================================================================
    FETCH WRAPPER
@@ -613,6 +611,9 @@ async function viewTenantOverview(root) {
   ]);
   root.appendChild(body);
 
+  const pilotMetrics = el('section', { class: 'card card-pad', id: 'pilotMetrics', style: 'margin-top:18px' }, skeleton('sk-stat', 3));
+  root.appendChild(pilotMetrics);
+
   // load usage + agents in parallel
   try {
     const [usage, agentsRes] = await Promise.all([
@@ -627,7 +628,9 @@ async function viewTenantOverview(root) {
     statsRow.innerHTML = '';
     statsRow.appendChild(statCard('Agents', String(State.agents.length), 'Live in this tenant'));
     statsRow.appendChild(statCard('Characters synthesized', fmtInr(totals.chars || 0), 'Across all days'));
-    statsRow.appendChild(statCard('Estimated spend', '₹' + fmtInr(totals.costInr || estimateCost(usage)), 'At promo rates', true));
+    const spend = usage.aiRuntimeSpend || {};
+    const spendValue = spend.status === 'not_metered' ? 'Not metered' : 'Unavailable';
+    statsRow.appendChild(statCard('AI runtime spend', spendValue, 'Excludes telephony, carrier, server, and tax'));
 
     const sh = $('#sparkHost'); sh.innerHTML = '';
     sh.appendChild(sparkPanel(usage.days || []));
@@ -646,6 +649,42 @@ async function viewTenantOverview(root) {
     });
     pm.textContent = live.length ? ('Active providers: ' + live.join(', ') + '.') : 'No live providers detected.';
   }).catch(() => {});
+
+  api('/api/observability').then((report) => {
+    if (!pilotMetrics.isConnected) return;
+    renderPilotMetrics(pilotMetrics, report);
+  }).catch((error) => {
+    if (!pilotMetrics.isConnected) return;
+    pilotMetrics.innerHTML = '';
+    pilotMetrics.appendChild(el('p', { class: 'muted', style: 'margin:0' }, 'Pilot metrics are unavailable. ' + error.message));
+  });
+}
+
+function metricPercent(value) {
+  return value == null ? 'Not recorded' : Math.round(value * 100) + '%';
+}
+
+function renderPilotMetrics(host, report) {
+  const metrics = report.metrics || {};
+  host.innerHTML = '';
+  host.appendChild(el('div', { class: 'flex items-center justify-between gap-2', style: 'flex-wrap:wrap;margin-bottom:14px' }, [
+    el('div', {}, [
+      el('h3', { class: 't-h3', style: 'margin:0' }, 'Pilot metrics'),
+      el('p', { class: 'muted', style: 'font-size:.8rem;margin:5px 0 0' }, 'Recorded commercial attempts, not carrier CDR.')
+    ]),
+    el('span', { class: 'pill' }, report.carrierCdr === 'not_recorded' ? 'Carrier CDR not recorded' : 'Carrier CDR available')
+  ]));
+  const values = [
+    ['Recorded dials', String(metrics.dials || 0), 'Commercial attempts'],
+    ['Answered rate', metricPercent(metrics.answerRatePerDial), 'Derived from recorded outcomes'],
+    ['Companies reached', String(metrics.companiesReached || 0), 'Of ' + String(metrics.prospects || 0) + ' prospects'],
+    ['Meetings booked', String(metrics.meetingsBooked || 0), 'Unique companies'],
+    ['Technical failures', String(metrics.technicalFailures || 0), 'Does not consume a commercial attempt'],
+    ['Cadence exhausted', String(metrics.cadenceExhausted || 0), 'No further automatic attempt']
+  ];
+  host.appendChild(el('div', { class: 'grid grid-3' }, values.map(([label, value, note]) => statCard(label, value, note))));
+  const unavailable = (report.unrecorded || []).join(', ');
+  if (unavailable) host.appendChild(el('p', { class: 'muted', style: 'font-size:.78rem;margin:14px 0 0' }, 'Not recorded: ' + unavailable + '.'));
 }
 
 function statCard(lbl, val, delta, up) {
@@ -655,13 +694,6 @@ function statCard(lbl, val, delta, up) {
     el('div', { class: 'delta' + (up ? ' up' : '') }, delta)
   ]);
 }
-function estimateCost(usage) {
-  // fallback if backend does not return costInr in totals
-  let c = 0;
-  (usage.days || []).forEach((d) => { c += (d.costInr || (d.chars || 0) / 1000 * RATE.mulberry); });
-  return Math.round(c * 100) / 100;
-}
-
 /* ---- sparkline (inline SVG, no libs) ---- */
 function sparkPanel(days) {
   const data = (days || []).map((d) => ({ day: d.day, v: d.chars || 0 }));
@@ -983,9 +1015,9 @@ function field(label, input) { return el('div', { class: 'field' }, [el('label',
    3. VOICE STUDIO
    =========================================================================== */
 function viewStudio(root) {
-  root.appendChild(viewHead('Voice Studio', 'Type anything, pick a model, and synthesize. See the waveform, hear it back, and watch the cost in real time.'));
+  root.appendChild(viewHead('Voice Studio', 'Type anything and synthesize with the configured server-side voice provider.'));
 
-  const st = { model: 'mulberry', tone: 'neutral', speaker: 'speaker_2', f0: 0, stream: false };
+  const st = { provider: '', model: '', tone: 'neutral', speaker: 'speaker_2', f0: 0, stream: false };
 
   const textArea = el('textarea', { class: 'textarea studio-text', id: 's_text', placeholder: 'Welcome to RapidX Voice. Production-grade AI voice starts from ₹1 per minute for the AI layer.' }, 'Welcome to RapidX Voice. Production-grade AI voice starts from ₹1 per minute for the AI layer.');
 
@@ -1020,21 +1052,19 @@ function viewStudio(root) {
   const costEl = el('span', { class: 'c-cost', id: 's_cost' }, [document.createTextNode('about '), el('b', {}, '₹0.00')]);
   function updateCost() {
     const len = (textArea.value || '').length;
-    const capped = Math.min(len, 2000);
-    const cost = capped / 1000 * (RATE[st.model] || RATE.mulberry);
     charsEl.textContent = len + ' chars' + (len > 2000 ? ' (capped at 2000)' : '');
-    costEl.innerHTML = '';
-    costEl.appendChild(document.createTextNode('about '));
-    costEl.appendChild(el('b', {}, '₹' + cost.toFixed(2)));
+    costEl.textContent = 'AI runtime spend is not metered';
   }
   textArea.addEventListener('input', updateCost);
 
+  const streamInput = el('input', { type: 'checkbox', disabled: 'disabled', onchange: (ev) => { st.stream = ev.target.checked; } });
+  const streamText = document.createTextNode('Loading streaming capability...');
   const streamToggle = el('label', { class: 'streamtoggle' }, [
-    el('input', { type: 'checkbox', onchange: (ev) => { st.stream = ev.target.checked; } }),
-    document.createTextNode('Stream progressively (low latency)')
+    streamInput,
+    streamText
   ]);
 
-  const synthBtn = el('button', { class: 'btn btn-primary' }, 'Synthesize');
+  const synthBtn = el('button', { class: 'btn btn-primary', disabled: 'disabled' }, 'Loading voice...');
   const audioEl = el('audio', { controls: 'controls', preload: 'none' });
   const waveCanvas = el('canvas', { class: 'wave-canvas', id: 's_wave' });
   const playerRow = el('div', { class: 'player-row', style: 'display:none' }, [audioEl]);
@@ -1047,21 +1077,52 @@ function viewStudio(root) {
     el('div', { class: 'flex items-center gap-2', style: 'flex-wrap:wrap' }, [synthBtn, streamToggle])
   ]);
 
+  const providerStatus = el('p', { class: 'muted', style: 'font-size:.8rem;margin:0 0 12px' }, 'Loading server voice configuration...');
+  const voiceControls = el('div', { class: 'voice-controls' });
   const side = el('div', { class: 'studio-side' }, [
     el('div', { class: 'card card-pad' }, [
       el('h3', { class: 't-h3', style: 'margin-bottom:14px' }, 'Voice'),
-      field('Model', modelSeg),
-      mugaCtl, mulSpeaker, mulPitch, mulDesc
+      providerStatus,
+      voiceControls
     ]),
     el('div', { class: 'card card-pad' }, [
       el('h3', { class: 't-h3', style: 'margin-bottom:14px' }, 'Economics'),
       el('div', { class: 'cost-readout' }, [charsEl, costEl]),
-      el('p', { class: 'muted', style: 'font-size:.8rem;margin-top:10px' }, 'Mulberry promo is about Rs 0.50 per 1000 chars, roughly 20x cheaper than ElevenLabs.')
+      el('p', { class: 'muted', style: 'font-size:.8rem;margin-top:10px' }, 'Telephony, carrier, server, and tax costs are excluded from the AI-runtime claim.')
     ])
   ]);
 
   root.appendChild(el('div', { class: 'studio-grid' }, [main, side]));
-  syncCtl(); updateCost();
+  updateCost();
+  ensureProviders().then((registry) => {
+    if (!root.isConnected) return;
+    const provider = (registry.tts || []).find((row) => row.selected);
+    if (!provider) throw new Error('No server-selected TTS provider is available.');
+    st.provider = provider.id;
+    st.model = provider.model;
+    st.stream = false;
+    providerStatus.textContent = provider.label + ' · ' + provider.model + ' · server selected';
+    streamInput.checked = false;
+    streamInput.disabled = !provider.streaming;
+    streamText.textContent = provider.streaming
+      ? 'Stream progressively with this provider'
+      : 'This provider returns complete WAV audio';
+    voiceControls.innerHTML = '';
+    if (provider.id === 'rumik') {
+      voiceControls.append(field('Model', modelSeg), mugaCtl, mulSpeaker, mulPitch, mulDesc);
+      syncCtl();
+    } else {
+      voiceControls.append(el('p', { class: 'muted', style: 'font-size:.8rem;margin:0' }, 'Voice and model are configured on the server.'));
+    }
+    synthBtn.disabled = false;
+    synthBtn.textContent = 'Synthesize';
+  }).catch((error) => {
+    if (!root.isConnected) return;
+    providerStatus.textContent = 'Could not load voice configuration. ' + error.message;
+    voiceControls.appendChild(el('p', { class: 'muted', style: 'font-size:.8rem;margin:0' }, 'Synthesis is unavailable until the server provider is reachable.'));
+    streamToggle.style.display = 'none';
+    synthBtn.textContent = 'Voice unavailable';
+  });
   // size the canvas after layout
   setTimeout(() => sizeCanvas(waveCanvas), 30);
   window.addEventListener('resize', () => sizeCanvas(waveCanvas), { once: true });
@@ -1070,9 +1131,10 @@ function viewStudio(root) {
 async function doSynthesize(st, textArea, btn, audioEl, canvas, playerRow) {
   const raw = (textArea.value || '').trim();
   if (!raw) { toast('Type something to synthesize.', 'err'); textArea.focus(); return; }
+  if (!st.provider || !st.model) { toast('Voice configuration is not ready.', 'err'); return; }
   let text = raw.slice(0, 2000);
   // muga tone is applied as a [tone] prefix
-  if (st.model === 'muga' && st.tone && st.tone !== 'neutral') text = '[' + st.tone + '] ' + text;
+  if (st.provider === 'rumik' && st.model === 'muga' && st.tone && st.tone !== 'neutral') text = '[' + st.tone + '] ' + text;
 
   const old = btn.textContent; btn.disabled = true; btn.textContent = 'Synthesizing...';
 
@@ -1089,8 +1151,8 @@ async function doSynthesize(st, textArea, btn, audioEl, canvas, playerRow) {
   }
 
   try {
-    const body = { text: text, model: st.model };
-    if (st.model === 'mulberry') { body.speaker = st.speaker; body.f0_up_key = st.f0; if (st.desc) body.description = st.desc; }
+    const body = { text: text, provider: st.provider, model: st.model };
+    if (st.provider === 'rumik' && st.model === 'mulberry') { body.speaker = st.speaker; body.f0_up_key = st.f0; if (st.desc) body.description = st.desc; }
     const res = await api('/api/tts', { method: 'POST', body: body });
     const chars = res.headers.get('X-Chars');
     const credits = res.headers.get('X-Credits-Used');
@@ -1194,7 +1256,7 @@ function roundRect(ctx, x, y, w, h, r) {
 
 /* ---- streaming TTS (PCM int16 LE 24kHz) via /api/ws-connect then wss Rumik ---- */
 async function streamSynthesize(text, st, canvas, btn) {
-  const mint = await api('/api/ws-connect', { method: 'POST', body: { text: text, model: st.model } });
+  const mint = await api('/api/ws-connect', { method: 'POST', body: { text: text, provider: st.provider, model: st.model } });
   if (!mint.ws_url) throw new ApiError(0, 'No ws_url returned.');
   return new Promise((resolve, reject) => {
     let ws, audioCtx, nextTime = 0, started = false, chunks = [];
@@ -1399,7 +1461,7 @@ async function viewTalk(root) {
   const statusDot = el('span', { class: 'conversation-dot', 'aria-hidden': 'true' });
   const statusText = el('span', {}, 'Ready');
   const statusPill = el('div', { class: 'conversation-status idle', role: 'status' }, [statusDot, statusText]);
-  const runtimePill = el('div', { class: 'conversation-pipeline' }, 'Dograh realtime voice · Deepgram · Groq · Rumik');
+  const runtimePill = el('div', { class: 'conversation-pipeline' }, 'Dograh realtime voice | loading server pipeline');
   const timingText = el('div', { class: 'conversation-timing', 'aria-live': 'polite' }, 'Latency is measured inside the live call runtime');
   const sessionBtn = el('button', { class: 'btn btn-primary conversation-btn', 'aria-label': 'Start voice call' }, [
     el('span', { class: 'conversation-btn-icon', 'aria-hidden': 'true', html: '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M22 16.9v3a2 2 0 0 1-2.18 2 19.8 19.8 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6A19.8 19.8 0 0 1 2.12 4.18 2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.12.9.33 1.78.62 2.63a2 2 0 0 1-.45 2.11L8 9.73a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c.85.29 1.73.5 2.63.62A2 2 0 0 1 22 16.9z"/></svg>' }),
@@ -1504,7 +1566,7 @@ async function viewTalk(root) {
       pc.ontrack = (event) => { if (event.track.kind === 'audio') { audio.srcObject = event.streams[0]; audio.play().catch(() => {}); } };
       pc.onconnectionstatechange = () => {
         if (!pc) return;
-        console.log('Rumik WebRTC state', pc.connectionState, pc.iceConnectionState);
+        console.log('Dograh WebRTC state', pc.connectionState, pc.iceConnectionState);
         timingText.textContent = 'WebRTC ' + pc.connectionState + ' · ICE ' + pc.iceConnectionState;
         if (pc.connectionState === 'connected') { callStarted = Date.now(); setStatus('listening', 'Live call connected'); }
         if (pc.connectionState === 'failed') { setStatus('error', 'Connection failed'); stopCall('Connection failed'); }
@@ -1519,7 +1581,7 @@ async function viewTalk(root) {
       await new Promise((resolve, reject) => { ws.onopen = resolve; ws.onerror = () => reject(new Error('Dograh signaling connection failed')); });
       pc.onicecandidate = (event) => {
         if (!ws || ws.readyState !== WebSocket.OPEN) return;
-        console.log('Rumik WebRTC candidate', event.candidate ? event.candidate.type : 'complete');
+        console.log('Dograh WebRTC candidate', event.candidate ? event.candidate.type : 'complete');
         if (event.candidate) timingText.textContent = 'ICE candidate: ' + event.candidate.type + ' · ' + event.candidate.protocol;
         ws.send(JSON.stringify({ type: 'ice-candidate', payload: { candidate: event.candidate ? { candidate: event.candidate.candidate, sdpMid: event.candidate.sdpMid, sdpMLineIndex: event.candidate.sdpMLineIndex } : null, pc_id: peerId } }));
       };
@@ -1546,12 +1608,23 @@ async function viewTalk(root) {
   ]);
   const info = el('div', { class: 'talk-side' }, [el('div', { class: 'card card-pad' }, [
     el('h3', { class: 't-h3' }, 'The actual phone runtime'),
-    el('p', { class: 'muted' }, 'Your microphone is connected to Dograh over WebRTC. Dograh runs the same published workflow, Deepgram, Groq and Rumik pipeline used for phone calls.'),
+    el('p', { class: 'muted' }, 'Your microphone is connected to Dograh over WebRTC. Dograh runs the same published workflow and server-selected STT, LLM, and TTS pipeline used for phone calls.'),
     el('hr', { class: 'divider' }),
     el('p', { class: 'muted' }, 'Turn detection, interruption, agent speech and latency now happen inside the call engine. Transcript text is a live diagnostic view, not the mechanism driving the page.'),
     el('p', { class: 'muted' }, 'Use End voice call to release the microphone and close the peer connection.')
   ])]);
   root.appendChild(el('div', { class: 'talk-grid' }, [panel, info]));
+  ensureProviders().then((registry) => {
+    if (!runtimePill.isConnected) return;
+    const selected = (layer) => (registry[layer] || []).find((row) => row.selected);
+    const labels = ['stt', 'llm', 'tts'].map((layer) => selected(layer)).filter(Boolean)
+      .map((row) => row.label + (row.model ? ' ' + row.model : ''));
+    runtimePill.textContent = labels.length
+      ? 'Dograh realtime voice | ' + labels.join(' | ')
+      : 'Dograh realtime voice | server pipeline unavailable';
+  }).catch(() => {
+    if (runtimePill.isConnected) runtimePill.textContent = 'Dograh realtime voice | server pipeline unavailable';
+  });
 }
 
 async function viewTalkLegacy(root) {
@@ -2118,8 +2191,13 @@ async function viewTelephony(root) {
 
 function paintTelephony(host, s) {
   host.innerHTML = '';
-  const providerLabel = s.provider === 'telnyx' ? 'Telnyx via Dograh' : 'VoBiz via Dograh';
-  const connected = s.connected === true && s.orchestrator === 'dograh';
+  const labels = {
+    brdid_asterisk: 'BR DID via Asterisk ARI',
+    telnyx: 'Telnyx via Dograh',
+    vobiz: 'VoBiz via Dograh'
+  };
+  const providerLabel = labels[s.provider] || (s.provider || 'Telephony');
+  const connected = s.connected === true;
   const config = s.configuration || {};
   const didList = Array.isArray(s.dids) ? s.dids : (s.did ? [{ number: s.did, status: 'active' }] : []);
 
@@ -2153,6 +2231,18 @@ function paintTelephony(host, s) {
     el('span', { class: 'k' }, 'Configuration'),
     el('span', { class: 'v' }, config.name || ('Telephony config ' + (config.id || '')))
   ]));
+  if (s.orchestrator) host.appendChild(el('div', { class: 'status-line' }, [
+    el('span', { class: 'k' }, 'Orchestrator'),
+    el('span', { class: 'v' }, s.orchestrator)
+  ]));
+  if (s.sipRegistration) host.appendChild(el('div', { class: 'status-line' }, [
+    el('span', { class: 'k' }, 'SIP registration'),
+    el('span', { class: 'v' }, s.sipRegistration)
+  ]));
+  if (s.ari) host.appendChild(el('div', { class: 'status-line' }, [
+    el('span', { class: 'k' }, 'ARI'),
+    el('span', { class: 'v' }, [s.ari.status, s.ari.app].filter(Boolean).join(' · '))
+  ]));
   host.appendChild(el('div', { class: 'status-line' }, [
     el('span', { class: 'k' }, 'Outbound workflow'),
     el('span', { class: 'v' }, s.workflowId ? 'Workflow ' + s.workflowId : 'not configured')
@@ -2162,11 +2252,13 @@ function paintTelephony(host, s) {
     el('a', { class: 'v', href: s.dashboard, target: '_blank', rel: 'noopener', style: 'color:var(--accent)' }, 'Open console')
   ]));
 
-  host.appendChild(el('div', { class: 'inbound-note' }, 'Outbound calls are initiated by Dograh using the active telephony configuration. Inbound calls follow the workflow assigned to each number.'));
+  host.appendChild(el('div', { class: 'inbound-note' }, s.provider === 'brdid_asterisk'
+    ? 'Outbound calls are originated by Asterisk ARI through the configured BR DID SIP trunk. Inbound routing depends on the SIP and dialplan path you configure.'
+    : 'Outbound calls are initiated by Dograh using the active telephony configuration. Inbound calls follow the workflow assigned to each number.'));
 }
 
 function dialForm() {
-  const provider = (State.telephony && State.telephony.provider) || 'telnyx';
+  const provider = (State.telephony && State.telephony.provider) || 'brdid_asterisk';
   const isVobiz = provider === 'vobiz';
   const numI = el('input', { class: 'input', id: 'dial_num', type: 'tel', inputmode: 'tel', maxlength: isVobiz ? 10 : 16, placeholder: isVobiz ? '9876543210' : '+5511999999999' });
   numI.addEventListener('input', () => {
@@ -2188,7 +2280,7 @@ function dialForm() {
 function refreshDialNumbers() { /* placeholder for future caller-id selection */ }
 
 function onDial(numI, btn) {
-  const provider = (State.telephony && State.telephony.provider) || 'telnyx';
+  const provider = (State.telephony && State.telephony.provider) || 'brdid_asterisk';
   const isVobiz = provider === 'vobiz';
   const num = isVobiz ? (numI.value || '').replace(/\D/g, '') : String(numI.value || '').trim();
   if ((isVobiz && num.length !== 10) || (!isVobiz && !/^\+[1-9]\d{7,14}$/.test(num))) {
@@ -2196,21 +2288,25 @@ function onDial(numI, btn) {
     numI.focus();
     return;
   }
+  const target = isVobiz ? ('+91' + num) : num;
+  const confirmation = el('input', { class: 'input', type: 'tel', inputmode: 'tel', autocomplete: 'off', placeholder: target });
   modal({
     title: 'Confirm a real call',
     body: el('div', {}, [
-      el('p', {}, ['You are about to place a real outbound call to ', el('b', {}, isVobiz ? ('+91 ' + num) : num), '.']),
+      el('p', {}, ['You are about to place a real outbound call to ', el('b', {}, target), '.']),
       el('div', { class: 'danger-note' }, [
         el('b', {}, 'This is a live, paid call. '),
         document.createTextNode('Dograh will initiate it through your active telephony configuration and charge your telephony account. Only continue if you intend to ring this number now.')
-      ])
+      ]),
+      field('Type the exact number to authorize', confirmation)
     ]),
     confirmText: 'Yes, place the call', confirmKind: 'danger',
     onConfirm: async () => {
+      if (confirmation.value.trim() !== target) throw new Error('The confirmation number must match the target exactly.');
       btn.disabled = true; btn.textContent = 'Dialing...';
       try {
-        const res = await api('/api/telephony/dial', { method: 'POST', body: { number: num, confirm: true } });
-        toast('Call placed to ' + (isVobiz ? ('+91 ' + num) : num) + '.', 'ok');
+        const res = await api('/api/telephony/dial', { method: 'POST', body: { number: num, confirmation: confirmation.value.trim() } });
+        toast('Call placed to ' + target + '.', 'ok');
         State.loaded.telephony = false; // refresh wallet next view
       } catch (ex) {
         if (ex.status === 400 && ex.data && ex.data.code === 'needs_confirm') toast('Confirmation required. Please retry.', 'err');
@@ -2727,7 +2823,12 @@ async function viewSettings(root) {
     try { await api('/api/privacy', { method: 'POST', body: { mode: privacySelect.value } }); toast('Privacy mode saved.', 'ok'); }
     catch (e) { toast(e.message, 'err'); } finally { privacySave.disabled = false; }
   };
-  const provider = el('select', { class: 'select' }, [el('option', { value: 'vobiz' }, 'VoBiz'), el('option', { value: 'telnyx' }, 'Telnyx'), el('option', { value: 'sip' }, 'SIP trunk')]);
+  const provider = el('select', { class: 'select' }, [
+    el('option', { value: 'brdid_asterisk' }, 'BR DID via Asterisk'),
+    el('option', { value: 'telnyx' }, 'Telnyx'),
+    el('option', { value: 'vobiz' }, 'VoBiz'),
+    el('option', { value: 'sip' }, 'SIP trunk')
+  ]);
   const address = el('input', { class: 'input', placeholder: 'Verified E.164 number or SIP address' });
   const label = el('input', { class: 'input', placeholder: 'Main sales line' });
   const byonList = el('div', { class: 'byon-list muted' }, 'Loading connections...');

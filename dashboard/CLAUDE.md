@@ -138,8 +138,8 @@ Authed (401 if no valid session):
 - `POST /api/chat` `{ messages:[{role,text}], system }` returns `{ text, finish }` (Gemini).
 - `POST /api/stt` `{ audio (base64), mime }` returns `{ text }` (Gemini transcription).
 - `GET  /api/telephony/status` returns the live VoiceLink `{ routing, wallet, dids, engine, did, dashboard }`.
-- `POST /api/telephony/dial` `{ number, confirm:true }` places a REAL paid call. GUARDED: returns
-  400 `needs_confirm` unless `confirm:true`. Never auto-call.
+- `POST /api/telephony/dial` `{ number, confirmation:number }` places a REAL paid call. GUARDED: returns
+  400 `needs_confirm` unless `confirmation` exactly matches `number`. Never auto-call.
 - `GET  /api/usage` returns `{ days:[...], totals:{...} }` (tenant scoped).
 - `GET  /api/providers` returns the provider registry, per layer, with `{ id, label, live, needs }`.
 

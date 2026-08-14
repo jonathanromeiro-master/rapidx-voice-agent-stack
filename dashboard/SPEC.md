@@ -84,8 +84,8 @@ Authed (require valid session; 401 if missing):
 - `POST /api/chat` `{ messages:[{role,text}], system }` -> `{ text, finish }`. Reuses verified Gemini call.
 - `POST /api/stt` `{ audio (base64), mime }` -> `{ text }` (Gemini transcription, verified).
 - `GET  /api/telephony/status` -> VoiceLink status `{ routing, wallet, dids, engine, did, dashboard }` (verified).
-- `POST /api/telephony/dial` `{ number, confirm:true }` -> places a REAL paid call. GUARDED:
-  returns 400 `needs_confirm` unless `confirm:true`. Never auto-call. Reuses verified add_lead.
+- `POST /api/telephony/dial` `{ number, confirmation:number }` -> places a REAL paid call. GUARDED:
+  returns 400 `needs_confirm` unless `confirmation` exactly matches `number`. Never auto-call. Reuses verified add_lead.
 - `GET  /api/usage` -> `{ days:[{day,chars,calls,llmTokens,costInr}], totals:{...} }` (tenant scoped).
 - `GET  /api/providers` -> the provider registry: for each layer, list providers with
   `{ id, label, live:bool, needs:[env keys] }` so the UI can show what is active vs ready-to-wire.

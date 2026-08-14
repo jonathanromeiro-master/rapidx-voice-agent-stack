@@ -23,6 +23,20 @@ Conclusão operacional imediata:
 - é ARM64, então todas as imagens/binários novos precisam ser compatíveis
 - existe carga e exposição prévia significativa; não é host vazio
 
+## Atualizacao de implantacao, 2026-08-13
+
+- Dograh esta saudavel em `https://163-176-48-94.sslip.io`; a rota publica
+  `/api/v1/openapi.json` respondeu `200` por TLS.
+- O Caddy existente continua atendendo `80/443`. Dograh usa nginx interno em
+  `127.0.0.1:18443`; Postgres, Redis, MinIO, ARI e motores de fala nao foram
+  publicados publicamente.
+- Os containers de speech local estao saudaveis na rede `rapidx-local-speech`.
+- A imagem privada `rapidx-asterisk:22.10.1` existe e os modulos ARI/WebSocket
+  foram carregados em teste isolado sem rede. O container Asterisk nao esta em
+  execucao porque as credenciais BR DID e ARI continuam ausentes.
+- O dashboard esta em `https://studio.163-176-48-94.sslip.io`; o container
+  `rapidx-voice` publica apenas `127.0.0.1:8787` e o Caddy fornece TLS.
+
 ## Portas em escuta
 
 ### Públicas
@@ -108,3 +122,13 @@ Relevantes:
 - `ufw` não está instalado, então o controle de borda deve estar fora dele ou ausente
 - ainda não foi auditado o conteúdo do Caddy atual
 - ainda não foi auditado o layout de diretórios dos serviços existentes
+
+## Atualização verificada em 2026-08-13
+
+- Dograh está saudável em `https://163-176-48-94.sslip.io`; o OpenAPI público respondeu `200`.
+- O Studio está saudável em `https://studio.163-176-48-94.sslip.io`; o container `rapidx-voice` está `running` com `0` reinícios e escuta apenas em `127.0.0.1:8787`.
+- Caddy existente continua dono de `80/443`; Dograh usa nginx interno em `127.0.0.1:18443`.
+- STT/TTS locais e a rede privada `rapidx-local-speech` estão em execução. O smoke test WAV para STT foi aprovado.
+- `GET /api/health/dependencies` do Studio retornou banco, STT e TTS como `healthy`; a fila está `disabled` e Dograh, ARI e SIP estão `not_configured` até o preenchimento completo das credenciais.
+- A imagem ARM64 do Asterisk foi compilada, mas o container Asterisk e o trunk BR DID permanecem desligados até haver credenciais SIP/ARI e o template de destino do carrier.
+- O Studio contém o runtime de cadência por tenant. Ele não agenda nem origina chamadas automaticamente; nenhuma chamada PSTN ou campanha foi executada.

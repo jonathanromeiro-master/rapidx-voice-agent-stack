@@ -1,0 +1,23 @@
+services:
+  asterisk:
+    build:
+      context: .
+    container_name: rapidx-asterisk
+    restart: unless-stopped
+    env_file:
+      - path: ./asterisk.env
+        format: raw
+    networks:
+      rapidx-telephony:
+        aliases:
+          - asterisk
+    healthcheck:
+      test: ["CMD-SHELL", "asterisk -rx 'core show version' | grep -q Asterisk"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 45s
+
+networks:
+  rapidx-telephony:
+    external: true

@@ -98,10 +98,19 @@ function readBody(req, cap = 64 * 1024) {
   });
 }
 
-// Generic HTTPS POST. Resolves { status, headers, buffer }. Times out at 60s.
-function httpsPost(host, pathname, headers, bodyBuf) {
+function requestUrl(target, options = {}) {
   return new Promise((resolve, reject) => {
-    const r = https.request({ host, path: pathname, method: 'POST', headers }, (resp) => {
+    const url = typeof target === 'string' ? new URL(target) : target;
+    const transport = url.protocol === 'http:' ? http : https;
+    const requestOptions = {
+      protocol: url.protocol,
+      host: url.hostname || url.host,
+      port: url.port || undefined,
+      path: `${url.pathname || '/'}${url.search || ''}`,
+      method: options.method || 'GET',
+      headers: options.headers || {},
+    };
+    const r = transport.request(requestOptions, (resp) => {
       const parts = [];
       resp.on('data', (d) => parts.push(d));
       resp.on('end', () => resolve({
@@ -111,27 +120,28 @@ function httpsPost(host, pathname, headers, bodyBuf) {
       }));
     });
     r.on('error', reject);
-    r.setTimeout(60000, () => r.destroy(new Error('upstream timeout')));
-    if (bodyBuf) r.write(bodyBuf);
+    r.setTimeout(options.timeoutMs || 20000, () => r.destroy(new Error('upstream timeout')));
+    if (options.body) r.write(options.body);
     r.end();
+  });
+}
+
+// Generic HTTPS POST. Resolves { status, headers, buffer }. Times out at 60s.
+function httpsPost(host, pathname, headers, bodyBuf) {
+  return requestUrl(`https://${host}${pathname}`, {
+    method: 'POST',
+    headers,
+    body: bodyBuf,
+    timeoutMs: 60000,
   });
 }
 
 // Generic HTTPS GET. Resolves { status, headers, buffer }. Times out at 20s.
 function httpsGet(host, pathname, headers) {
-  return new Promise((resolve, reject) => {
-    const r = https.request({ host, path: pathname, method: 'GET', headers }, (resp) => {
-      const parts = [];
-      resp.on('data', (d) => parts.push(d));
-      resp.on('end', () => resolve({
-        status: resp.statusCode,
-        headers: resp.headers,
-        buffer: Buffer.concat(parts),
-      }));
-    });
-    r.on('error', reject);
-    r.setTimeout(20000, () => r.destroy(new Error('upstream timeout')));
-    r.end();
+  return requestUrl(`https://${host}${pathname}`, {
+    method: 'GET',
+    headers,
+    timeoutMs: 20000,
   });
 }
 
@@ -164,13 +174,13 @@ const DB_TMP = `${DB_FILE}.tmp`;
 
 function defaultDb() {
   return {
-    schemaVersion: 4,
+    schemaVersion: 5,
     tenants: [], users: [], agents: [], usage: [], sessions: [],
     wallets: [], ledger: [], paymentIntents: [], supportTickets: [],
     supportMessages: [], auditEvents: [], presets: [], byonConnections: [],
     hvacJobs: [], hvacSettings: [], paymentEvents: [], demoLinks: [],
     invoices: [], invoiceEvents: [], integrationRequests: [], agencyPrompts: [],
-    clientActivities: [], tenantStatusEvents: [],
+    clientActivities: [], tenantStatusEvents: [], prospects: [], prospectAttempts: [],
   };
 }
 
@@ -179,13 +189,13 @@ const COLLECTIONS = [
   'paymentIntents', 'supportTickets', 'supportMessages', 'auditEvents',
   'presets', 'byonConnections', 'hvacJobs', 'hvacSettings', 'paymentEvents', 'demoLinks',
   'invoices', 'invoiceEvents', 'integrationRequests', 'agencyPrompts',
-  'clientActivities', 'tenantStatusEvents',
+  'clientActivities', 'tenantStatusEvents', 'prospects', 'prospectAttempts',
 ];
 
 function migrateDb(parsed) {
   const out = Object.assign(defaultDb(), parsed || {});
   for (const k of COLLECTIONS) if (!Array.isArray(out[k])) out[k] = [];
-  out.schemaVersion = 4;
+  out.schemaVersion = 5;
   for (const tenant of out.tenants) {
     if (!tenant.status) tenant.status = 'active';
     if (!tenant.privacyMode) tenant.privacyMode = 'standard';
@@ -475,7 +485,7 @@ function genId(prefix) {
 module.exports = {
   ROOT, DATA_DIR, DB_FILE, PUBLIC_DIR,
   loadEnv,
-  send, sendJson, readBody, httpsPost, httpsGet,
+  send, sendJson, readBody, requestUrl, httpsPost, httpsGet,
   htmlEscape,
   db, mutate, loadDb, defaultDb, migrateDb,
   hashPassword, verifyPassword,

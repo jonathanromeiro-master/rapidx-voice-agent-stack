@@ -3,11 +3,79 @@
 . "$(dirname "$0")/_common.sh"
 
 TOK=$(dograh_token); export TOK
-ok "Authenticated as $DOGRAH_EMAIL"
-TELEPHONY_PROVIDER="${TELEPHONY_PROVIDER:-telnyx}"
+ok "Dograh authentication succeeded"
+TELEPHONY_PROVIDER="${TELEPHONY_PROVIDER:-brdid_asterisk}"
 TELEPHONY_COUNTRY_CODE="${TELEPHONY_COUNTRY_CODE:-$( [ "$TELEPHONY_PROVIDER" = "vobiz" ] && printf IN || printf BR )}"
+STT_PROVIDER="${STT_PROVIDER:-local_whisper}"
+TTS_PROVIDER="${TTS_PROVIDER:-local_piper}"
+LLM_PROVIDER="${LLM_PROVIDER:-groq}"
+CFG_ID=""
+PN_ID=""
+INBOUND_PN_ID=""
 
 # ---- a) Telephony configuration --------------------------------------------
+if [ "$TELEPHONY_PROVIDER" = "brdid_asterisk" ]; then
+  : "${ASTERISK_ARI_URL:?Set ASTERISK_ARI_URL in .env}"
+  : "${ASTERISK_ARI_APP:?Set ASTERISK_ARI_APP in .env}"
+  : "${ASTERISK_ARI_PASSWORD:?Set ASTERISK_ARI_PASSWORD in .env}"
+  : "${BRDID_CALLER_ID:?Set BRDID_CALLER_ID in .env}"
+  : "${BRDID_INBOUND_EXTENSION:?Set BRDID_INBOUND_EXTENSION in .env}"
+  say "Creating the BR DID Asterisk ARI configuration in Dograh"
+  CFG=$(api POST /api/v1/organizations/telephony-configs "$(python3 - <<PY
+import json,os
+endpoint=os.environ["ASTERISK_ARI_URL"].rstrip("/")
+if endpoint.endswith("/ari"):
+    endpoint=endpoint[:-4]
+if not endpoint.startswith(("http://", "https://")):
+    raise SystemExit("ASTERISK_ARI_URL must be HTTP(S)")
+print(json.dumps({
+  "name":"BR DID Asterisk",
+  "is_default_outbound": True,
+  "config": {
+    "provider":"ari",
+    "ari_endpoint":endpoint,
+    "app_name":os.environ["ASTERISK_ARI_APP"],
+    "app_password":os.environ["ASTERISK_ARI_PASSWORD"],
+    "ws_client_name":"dograh",
+    "from_numbers":[os.environ["BRDID_CALLER_ID"]],
+  },
+}))
+PY
+)")
+  CFG_ID=$(printf '%s' "$CFG" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
+  ok "Telephony config id $CFG_ID"
+
+  say "Attaching BR DID outbound caller ID"
+  PN=$(api POST "/api/v1/organizations/telephony-configs/$CFG_ID/phone-numbers" "$(python3 - <<PY
+import json,os
+print(json.dumps({
+  "address": os.environ["BRDID_CALLER_ID"],
+  "country_code": os.environ.get("TELEPHONY_COUNTRY_CODE", "BR"),
+  "label": "BR DID Outbound",
+  "is_active": True,
+  "is_default_caller_id": True,
+}))
+PY
+)")
+  PN_ID=$(printf '%s' "$PN" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
+  INBOUND_PN_ID="$PN_ID"
+
+  if [ "$BRDID_INBOUND_EXTENSION" != "$BRDID_CALLER_ID" ]; then
+    say "Attaching BR DID inbound extension"
+    INBOUND_PN=$(api POST "/api/v1/organizations/telephony-configs/$CFG_ID/phone-numbers" "$(python3 - <<PY
+import json,os
+print(json.dumps({
+  "address": os.environ["BRDID_INBOUND_EXTENSION"],
+  "country_code": os.environ.get("TELEPHONY_COUNTRY_CODE", "BR"),
+  "label": "BR DID Inbound",
+  "is_active": True,
+  "is_default_caller_id": False,
+}))
+PY
+)")
+    INBOUND_PN_ID=$(printf '%s' "$INBOUND_PN" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
+  fi
+else
 say "Creating the $TELEPHONY_PROVIDER telephony configuration"
 CFG=$(api POST /api/v1/organizations/telephony-configs "$(python3 - <<PY
 import json,os
@@ -58,32 +126,85 @@ print(json.dumps({
 PY
 )")
 PN_ID=$(printf '%s' "$PN" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
+INBOUND_PN_ID="$PN_ID"
 ok "Phone number id $PN_ID"
+fi
 
 # ---- c) Model pipeline ------------------------------------------------------
 # PIPELINE mode, not realtime. Gemini Live native-audio realtime does not do turn
 # detection over an 8k telephony stream: the call connects, the agent may greet,
 # then never responds and dies with user_idle_max_duration_exceeded. A normal
 # STT -> LLM -> TTS pipeline uses Dograh's own VAD and works on the phone.
-say "Setting the model pipeline (deepgram + groq + rumik)"
+say "Setting the model pipeline ($STT_PROVIDER + $LLM_PROVIDER + $TTS_PROVIDER)"
 api PUT /api/v1/organizations/model-configurations/v2 "$(python3 - <<PY
 import json,os
+stt_provider=os.environ.get("STT_PROVIDER","local_whisper").strip().lower()
+tts_provider=os.environ.get("TTS_PROVIDER","local_piper").strip().lower()
+llm_provider=os.environ.get("LLM_PROVIDER","groq").strip().lower()
+
+if stt_provider == "local_whisper":
+    stt = {
+      "provider":"speaches",
+      "api_key": os.environ.get("LOCAL_STT_API_KEY") or None,
+      "base_url": os.environ["LOCAL_STT_BASE_URL"],
+      "model": os.environ.get("LOCAL_STT_MODEL","small"),
+      "language": os.environ.get("LOCAL_STT_LANGUAGE","pt"),
+    }
+elif stt_provider == "deepgram":
+    stt = {
+      "provider":"deepgram",
+      "api_key":os.environ["DEEPGRAM_API_KEY"],
+      "model":os.environ.get("DEEPGRAM_MODEL","nova-3-general"),
+      "language":os.environ.get("DEEPGRAM_LANGUAGE","multi"),
+    }
+else:
+    raise SystemExit(f"Unsupported STT_PROVIDER: {stt_provider}")
+
+if llm_provider == "groq":
+    llm = {
+      "provider":"groq",
+      "api_key":os.environ["GROQ_API_KEY"],
+      "model":os.environ.get("GROQ_MODEL","llama-3.3-70b-versatile"),
+    }
+elif llm_provider == "gemini":
+    llm = {
+      "provider":"google",
+      "api_key":os.environ["GEMINI_API_KEY"],
+      "model":os.environ.get("GEMINI_MODEL","gemini-3.5-flash-lite"),
+    }
+else:
+    raise SystemExit(f"Unsupported LLM_PROVIDER: {llm_provider}")
+
+if tts_provider == "local_piper":
+    tts = {
+      "provider":"openai",
+      "api_key":os.environ.get("LOCAL_TTS_API_KEY","none"),
+      "base_url":os.environ["LOCAL_TTS_BASE_URL"],
+      "model":os.environ.get("LOCAL_TTS_MODEL","piper"),
+      "voice":os.environ.get("LOCAL_TTS_VOICE","pt_BR-faber-medium"),
+    }
+elif tts_provider == "rumik":
+    tts = {
+      "provider":"rumik",
+      "api_key":os.environ["RUMIK_API_KEY"],
+      "model":os.environ.get("RUMIK_MODEL","mulberry"),
+      "voice":os.environ.get("RUMIK_VOICE","ira"),
+      "description":"a warm conversational brazilian portuguese voice for outbound prospecting",
+      "temperature":0.6,"top_p":0.95,"top_k":50,
+      "full_response_aggregation": True,
+    }
+else:
+    raise SystemExit(f"Unsupported TTS_PROVIDER: {tts_provider}")
+
 print(json.dumps({
   "version": 2,
   "mode": "byok",
   "byok": {
     "mode": "pipeline",
     "pipeline": {
-      "stt": {"provider":"deepgram","api_key":os.environ["DEEPGRAM_API_KEY"],
-              "model":"nova-3-general","language":"multi"},
-      "llm": {"provider":"groq","api_key":os.environ["GROQ_API_KEY"],
-              "model":os.environ.get("GROQ_MODEL","llama-3.3-70b-versatile")},
-      "tts": {"provider":"rumik","api_key":os.environ["RUMIK_API_KEY"],
-              "model":os.environ.get("RUMIK_MODEL","mulberry"),
-              "voice":os.environ.get("RUMIK_VOICE","ira"),
-              "description":"a warm 30s indian english voice, smooth timbre, natural conversational pacing, like a friendly receptionist",
-              "temperature":0.6,"top_p":0.95,"top_k":50,
-              "full_response_aggregation": True},
+      "stt": stt,
+      "llm": llm,
+      "tts": tts,
     },
   },
 }))
@@ -111,19 +232,25 @@ ok "Workflow id $WF_ID active"
 
 # Bind inbound calls only after the workflow exists. This also makes Dograh
 # update the provider application's answer_url and synchronize the DID.
-say "Binding the active number to workflow $WF_ID for inbound calls"
-api PUT "/api/v1/organizations/telephony-configs/$CFG_ID/phone-numbers/$PN_ID" \
+if [ -n "$CFG_ID" ] && [ -n "$INBOUND_PN_ID" ]; then
+say "Binding the inbound number to workflow $WF_ID"
+api PUT "/api/v1/organizations/telephony-configs/$CFG_ID/phone-numbers/$INBOUND_PN_ID" \
   "$(python3 - <<PY
 import json
 print(json.dumps({"inbound_workflow_id": int("$WF_ID"), "is_active": True}))
 PY
 )" >/dev/null
 ok "Inbound workflow attached"
+else
+die "Telephony configuration did not produce an inbound phone number"
+fi
 
 # ---- verify -----------------------------------------------------------------
 say "Verifying"
-api GET /api/v1/organizations/telephony-configs | python3 -m json.tool
-api GET "/api/v1/organizations/telephony-configs/$CFG_ID/phone-numbers" | python3 -m json.tool
+if [ -n "$CFG_ID" ]; then
+  api GET /api/v1/organizations/telephony-configs | python3 -m json.tool
+  api GET "/api/v1/organizations/telephony-configs/$CFG_ID/phone-numbers" | python3 -m json.tool
+fi
 api GET /api/v1/organizations/model-configurations/v2 | python3 -c \
   'import json,sys; c=json.load(sys.stdin)["effective_configuration"]; print("stt:",c["stt"]["provider"],"| llm:",c["llm"]["provider"],"| tts:",c["tts"]["provider"],"| realtime:",c["is_realtime"])'
 api GET /api/v1/workflow/summary | python3 -m json.tool
@@ -133,6 +260,7 @@ cat <<NEXT
 Save these:
   TELEPHONY_CONFIG_ID=$CFG_ID
   PHONE_NUMBER_ID=$PN_ID
+  INBOUND_PHONE_NUMBER_ID=$INBOUND_PN_ID
   WORKFLOW_ID=$WF_ID
 
 Append them to .env, then run:

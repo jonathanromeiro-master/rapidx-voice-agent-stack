@@ -17,10 +17,10 @@ Telnyx permanece como fallback durante a migração.
 ## Estado atual no repositório
 
 - provider configurável em `TELEPHONY_PROVIDER`
-- suporte documentado para `vobiz` e `telnyx`
-- `deploy/03-configure.sh` cria telephony configs no Dograh
+- adapters implementados para `brdid_asterisk`, `telnyx` e `vobiz`
+- `deploy/03-configure.sh` cria a config `provider: ari` no Dograh para BR DID/Asterisk
 - `deploy/05-place-call.sh` dispara outbound via `POST /api/v1/telephony/initiate-call`
-- `dashboard/lib/providers.js` expõe status e dial via Dograh
+- `dashboard/lib/providers.js` lê ARI e cria o run no Dograh antes de originar o endpoint PJSIP
 
 ## Estado alvo
 
@@ -70,9 +70,9 @@ ASTERISK_ARI_APP=
 
 | Arquivo | Situação |
 |---|---|
-| `deploy/03-configure.sh` | hoje configura Dograh direto com Telnyx/Vobiz; precisará bifurcação ou novo caminho Asterisk |
-| `deploy/05-place-call.sh` | hoje assume outbound pelo Dograh; precisará suportar fluxo via Asterisk/ARI |
-| `dashboard/lib/providers.js` | precisa deixar de assumir que telephony ativa é sempre um provider cloud via Dograh |
+| `deploy/03-configure.sh` | cria a configuração nativa `provider: ari` do Dograh e vincula caller ID e extensão inbound |
+| `deploy/05-place-call.sh` | cria a chamada pelo Dograh, que entrega o endpoint PJSIP ao Asterisk com o workflow run correto |
+| `dashboard/lib/providers.js` | lê o estado do Asterisk ARI e inicia outbound pelo Dograh, nunca por `ARI /channels` direto |
 | `dashboard/public/assets/app.js` | UI de teste de chamadas precisa refletir BR DID/Asterisk e manter Telnyx como fallback |
 
 ## BR DID

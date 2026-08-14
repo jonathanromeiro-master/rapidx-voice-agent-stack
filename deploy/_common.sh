@@ -8,23 +8,32 @@ set -a; . "$ROOT/.env"; set +a
 
 : "${VPS_IP:?VPS_IP is required in .env}"
 SSH_KEY="${SSH_KEY/#\~/$HOME}"
+SSH_USER="${SSH_USER:-ubuntu}"
 DOGRAH_HOST="${DOGRAH_HOST:-$(echo "$VPS_IP" | tr '.' '-').sslip.io}"
 BASE="https://$DOGRAH_HOST"
 
-rsh() { ssh -o ConnectTimeout=15 -o StrictHostKeyChecking=no -i "$SSH_KEY" "root@$VPS_IP" "$@"; }
+rsh() { ssh -o ConnectTimeout=15 -o StrictHostKeyChecking=no -i "$SSH_KEY" "$SSH_USER@$VPS_IP" "$@"; }
 
-api_container() { rsh "docker ps --format '{{.Names}}' | grep dograh-api | head -1"; }
-pg_container()  { rsh "docker ps --format '{{.Names}}' | grep dograh-postgres | head -1"; }
+api_container() { rsh "sudo -n docker ps --format '{{.Names}}' | grep dograh-api | head -1"; }
+pg_container()  { rsh "sudo -n docker ps --format '{{.Names}}' | grep dograh-postgres | head -1"; }
 
-# Logs in and echoes a bearer token. Fails loudly rather than returning empty.
+# Logs in locally and echoes a bearer token. Keeping credentials off the VPS
+# command line avoids leaking them through remote process listings.
 dograh_token() {
-  local out
-  out=$(rsh "curl -sL -X POST $BASE/api/v1/auth/login -k \
+  local out body status tok
+  body=$(python3 - <<PY
+import json
+import os
+print(json.dumps({"email": os.environ["DOGRAH_EMAIL"], "password": os.environ["DOGRAH_PASSWORD"]}))
+PY
+)
+  out=$(curl -ksS -L -X POST "$BASE/api/v1/auth/login" \
       -H 'Content-Type: application/json' \
-      -d '{\"email\":\"$DOGRAH_EMAIL\",\"password\":\"$DOGRAH_PASSWORD\"}'")
-  local tok
+      -d "$body" -w $'\n%{http_code}')
+  status="${out##*$'\n'}"
+  out="${out%$'\n'*}"
   tok=$(printf '%s' "$out" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("access_token") or d.get("token") or "")' 2>/dev/null || true)
-  [ -n "$tok" ] || { echo "Login failed: $out" >&2; exit 1; }
+  [ -n "$tok" ] || { echo "Login failed with HTTP status $status" >&2; exit 1; }
   printf '%s' "$tok"
 }
 
@@ -33,10 +42,10 @@ api() {
   local method="$1" path="$2" body="${3:-}" tok="${TOK:-}"
   [ -n "$tok" ] || tok=$(dograh_token)
   if [ -n "$body" ]; then
-    rsh "curl -sL -X $method '$BASE$path' -k -H 'Authorization: Bearer $tok' \
-         -H 'Content-Type: application/json' -d '$(printf '%s' "$body" | sed "s/'/'\\\\''/g")'"
+    curl -ksS -L -X "$method" "$BASE$path" -H "Authorization: Bearer $tok" \
+      -H 'Content-Type: application/json' -d "$body"
   else
-    rsh "curl -sL -X $method '$BASE$path' -k -H 'Authorization: Bearer $tok'"
+    curl -ksS -L -X "$method" "$BASE$path" -H "Authorization: Bearer $tok"
   fi
 }
 
