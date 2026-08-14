@@ -145,10 +145,13 @@ tts_provider=os.environ.get("TTS_PROVIDER","local_piper").strip().lower()
 llm_provider=os.environ.get("LLM_PROVIDER","groq").strip().lower()
 
 if stt_provider == "local_whisper":
+    local_stt_base_url=os.environ["LOCAL_STT_BASE_URL"].rstrip("/")
+    if not local_stt_base_url.endswith("/v1"):
+        local_stt_base_url += "/v1"
     stt = {
       "provider":"speaches",
       "api_key": os.environ.get("LOCAL_STT_API_KEY") or None,
-      "base_url": os.environ["LOCAL_STT_BASE_URL"],
+      "base_url": local_stt_base_url,
       "model": os.environ.get("LOCAL_STT_MODEL","small"),
       "language": os.environ.get("LOCAL_STT_LANGUAGE","pt"),
     }
