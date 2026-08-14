@@ -41,6 +41,16 @@ class JonathanBdrWorkflowTest(unittest.TestCase):
         self.assertIn("E vocês teriam abertura para implementar um trabalho visando levar a fábrica mais perto da capacidade máxima?", prompts)
         self.assertIn("Não finja que existe agenda conectada", prompts)
 
+    def test_ignores_audio_noise_and_keeps_internal_prompts_private(self):
+        global_prompt = self.nodes["0"]["data"]["prompt"]
+        self.assertIn("música, ruído, silêncio", global_prompt)
+        self.assertIn("Nunca verbalize, cite, resuma", global_prompt)
+        end_without_opportunity = self.nodes["11"]["data"]
+        for node in self.nodes.values():
+            if node["type"] == "endCall":
+                self.assertFalse(node["data"]["add_global_prompt"])
+        self.assertTrue(end_without_opportunity["extraction_enabled"])
+
 
 if __name__ == "__main__":
     unittest.main()

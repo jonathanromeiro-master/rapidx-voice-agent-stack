@@ -3,6 +3,7 @@ import importlib.util
 import json
 import pathlib
 import threading
+import time
 import unittest
 import urllib.request
 from http.server import ThreadingHTTPServer
@@ -43,6 +44,35 @@ class LocalTtsContractTest(unittest.TestCase):
         self.assertEqual(response.status, 200)
         self.assertEqual(payload["data"][0]["id"], "piper")
         self.assertEqual(payload["data"][0]["created"], 0)
+
+    def test_serializes_piper_synthesis_requests(self):
+        active = 0
+        maximum_active = 0
+        guard = threading.Lock()
+        original_fetch = LOCAL_TTS.fetch
+
+        def fake_fetch(*_args, **_kwargs):
+            nonlocal active, maximum_active
+            with guard:
+                active += 1
+                maximum_active = max(maximum_active, active)
+            time.sleep(0.02)
+            with guard:
+                active -= 1
+            return 200, {"Content-Type": "audio/wav"}, b"RIFFdata"
+
+        try:
+            LOCAL_TTS.fetch = fake_fetch
+            body = json.dumps({"input": "teste"}).encode("utf-8")
+            threads = [threading.Thread(target=LOCAL_TTS.synthesize, args=(body,)) for _ in range(2)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+        finally:
+            LOCAL_TTS.fetch = original_fetch
+
+        self.assertEqual(maximum_active, 1)
 
 
 if __name__ == "__main__":

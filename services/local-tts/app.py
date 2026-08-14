@@ -3,6 +3,7 @@ import json
 import os
 import signal
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -14,6 +15,7 @@ UPSTREAM_URL = os.environ.get("TTS_UPSTREAM_URL", "").strip()
 UPSTREAM_HEALTH_URL = os.environ.get("TTS_UPSTREAM_HEALTH_URL", "").strip()
 TIMEOUT = float(os.environ.get("REQUEST_TIMEOUT_SECONDS", "30"))
 MAX_BODY = int(os.environ.get("MAX_BODY_BYTES", str(512 * 1024)))
+SYNTHESIS_LOCK = threading.Lock()
 
 
 def log(event):
@@ -44,6 +46,38 @@ def model_list():
         "object": "list",
         "data": [{"id": "piper", "object": "model", "created": 0, "owned_by": "rapidx-local"}],
     }
+
+
+def synthesize(body, authorization=None):
+    upstream_payload = json.loads(body.decode("utf-8"))
+    mapped = {
+        "text": upstream_payload.get("input") or upstream_payload.get("text") or "",
+    }
+    if upstream_payload.get("voice"):
+        mapped["voice"] = upstream_payload["voice"]
+    if upstream_payload.get("speed") not in (None, ""):
+        try:
+            speed = float(upstream_payload["speed"])
+            if speed > 0:
+                mapped["length_scale"] = round(1.0 / speed, 4)
+        except Exception:
+            pass
+    if upstream_payload.get("speaker") not in (None, ""):
+        mapped["speaker"] = upstream_payload["speaker"]
+    if upstream_payload.get("speaker_id") not in (None, ""):
+        mapped["speaker_id"] = upstream_payload["speaker_id"]
+
+    forwarded = json.dumps(mapped).encode("utf-8")
+    headers = {
+        "Content-Type": "application/json",
+        "Content-Length": str(len(forwarded)),
+    }
+    if authorization:
+        headers["Authorization"] = authorization
+
+    # Piper writes a shared WAV file, so concurrent synthesis corrupts output.
+    with SYNTHESIS_LOCK:
+        return fetch(UPSTREAM_URL, method="POST", body=forwarded, headers=headers)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -106,31 +140,7 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(413, {"ok": False, "error": "payload_too_large"})
                 return
             body = self.rfile.read(length)
-            upstream_payload = json.loads(body.decode("utf-8"))
-            mapped = {
-                "text": upstream_payload.get("input") or upstream_payload.get("text") or "",
-            }
-            if upstream_payload.get("voice"):
-                mapped["voice"] = upstream_payload["voice"]
-            if upstream_payload.get("speed") not in (None, ""):
-                try:
-                    speed = float(upstream_payload["speed"])
-                    if speed > 0:
-                        mapped["length_scale"] = round(1.0 / speed, 4)
-                except Exception:
-                    pass
-            if upstream_payload.get("speaker") not in (None, ""):
-                mapped["speaker"] = upstream_payload["speaker"]
-            if upstream_payload.get("speaker_id") not in (None, ""):
-                mapped["speaker_id"] = upstream_payload["speaker_id"]
-            body = json.dumps(mapped).encode("utf-8")
-            forward_headers = {
-                "Content-Type": "application/json",
-                "Content-Length": str(len(body)),
-            }
-            if self.headers.get("Authorization"):
-                forward_headers["Authorization"] = self.headers["Authorization"]
-            status, headers, data = fetch(UPSTREAM_URL, method="POST", body=body, headers=forward_headers)
+            status, headers, data = synthesize(body, self.headers.get("Authorization"))
             try:
                 content_type = wav_content_type(status, data)
             except ValueError:
