@@ -84,6 +84,24 @@ validate_telnyx_resources
 TOK=$(dograh_token); export TOK
 ok "Dograh authentication succeeded"
 
+validate_dograh_workflow() {
+  say "Validating the active Dograh workflow"
+  api GET "/api/v1/workflow/fetch/$DOGRAH_WORKFLOW_ID" | \
+    DOGRAH_WORKFLOW_ID="$DOGRAH_WORKFLOW_ID" python3 -c '
+import json, os, sys
+workflow = json.load(sys.stdin)
+if str(workflow.get("id", "")) != os.environ["DOGRAH_WORKFLOW_ID"]:
+    raise SystemExit("Dograh workflow was not found")
+if str(workflow.get("status", "")).lower() != "active":
+    raise SystemExit("Dograh workflow is not active")
+if not workflow.get("current_definition_id"):
+    raise SystemExit("Dograh workflow has no current definition")
+'
+  ok "Dograh workflow is active"
+}
+
+validate_dograh_workflow
+
 find_telnyx_config() {
   api GET /api/v1/organizations/telephony-configs | python3 -c '
 import json, sys

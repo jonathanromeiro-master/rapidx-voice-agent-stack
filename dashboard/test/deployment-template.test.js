@@ -36,5 +36,7 @@ test('Telnyx activation validates the active mobile caller ID before Dograh chan
   assert.match(script, /\/connections\/\$TELNYX_CONNECTION_ID/);
   assert.match(script, /filter%5Bphone_number%5D=/);
   assert.match(script, /phone_number_type.*mobile/);
+  assert.match(script, /\/workflow\/fetch\/\$DOGRAH_WORKFLOW_ID/);
   assert.ok(script.indexOf('validate_telnyx_resources\n\nTOK=') > -1);
+  assert.ok(script.indexOf('validate_dograh_workflow\n\nfind_telnyx_config') > -1);
 });
