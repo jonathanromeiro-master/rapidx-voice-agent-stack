@@ -68,6 +68,7 @@ test('agency OS APIs complete the lifecycle and preserve tenant isolation', { ti
       TEST_USER_TENANT: 'RapidX Agency QA',
       TEST_USER_SUPER_ADMIN: 'true',
       PUBLIC_ORIGIN: baseUrl,
+      TRUST_PROXY: '1',
       DOGRAH_BASE_URL: 'https://dograh.invalid/api/v1',
       DOGRAH_API_KEY: '',
       ASTERISK_ARI_URL: 'http://127.0.0.1:8088/ari',
@@ -416,6 +417,27 @@ test('agency OS APIs complete the lifecycle and preserve tenant isolation', { ti
   assert.equal(prospectCreated.response.status, 201, prospectCreated.json.error);
   const prospectId = prospectCreated.json.prospect.id;
 
+  for (let index = 0; index < 50; index += 1) {
+    const canaryProspect = await request(admin.cookie, '/api/prospects', {
+      method: 'POST',
+      headers: { 'X-Forwarded-For': '198.51.100.88' },
+      body: {
+        companyName: `Canary Company ${String(index + 1).padStart(2, '0')}`,
+        phoneNumber: `+5511${String(900000000 + index)}`,
+        purpose: 'Synthetic consent-safe capacity test',
+        legalBasis: 'Synthetic test data only',
+        timezone: 'America/Cuiaba',
+      },
+    });
+    assert.equal(canaryProspect.response.status, 201, canaryProspect.json.error);
+    assert.equal(canaryProspect.json.prospect.state, 'NEW');
+  }
+
+  const stagedProspects = await request(admin.cookie, '/api/prospects');
+  assert.equal(stagedProspects.response.status, 200, stagedProspects.json.error);
+  assert.equal(stagedProspects.json.prospects.length, 51);
+  assert.ok(stagedProspects.json.prospects.every((row) => row.businessAttempts === 0 && row.technicalAttempts === 0));
+
   const clientProspects = await request(client.cookie, '/api/prospects');
   assert.equal(clientProspects.response.status, 200, clientProspects.json.error);
   assert.deepEqual(clientProspects.json.prospects, []);
@@ -452,7 +474,7 @@ test('agency OS APIs complete the lifecycle and preserve tenant isolation', { ti
   assert.equal(cadenceStatus.json.breaker.open, true);
   const adminObservability = await request(admin.cookie, '/api/observability');
   assert.equal(adminObservability.response.status, 200, adminObservability.json.error);
-  assert.equal(adminObservability.json.metrics.prospects, 1);
+  assert.equal(adminObservability.json.metrics.prospects, 51);
   assert.equal(adminObservability.json.metrics.technicalFailures, 3);
   assert.equal(cadenceStatus.json.policy.autoDial, false);
   const breakerBlockedDial = await request(admin.cookie, '/api/telephony/dial', {
@@ -561,7 +583,7 @@ test('agency OS APIs complete the lifecycle and preserve tenant isolation', { ti
   assert.ok(persisted.clientActivities.some((row) => row.id === approached.json.activity.id));
   assert.equal(persisted.integrationRequests.length, 2);
   assert.equal(persisted.agencyPrompts.length, 2);
-  assert.equal(persisted.prospects.length, 1);
+  assert.equal(persisted.prospects.length, 51);
   assert.equal(persisted.prospectAttempts.length, 3);
   // Windows does not expose POSIX chmod bits through stat.mode.
   if (process.platform !== 'win32') assert.equal((await stat(dbFile)).mode & 0o777, 0o600);
