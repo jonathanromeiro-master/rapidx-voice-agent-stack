@@ -3,6 +3,9 @@
 # workflows, or initiates a PSTN call.
 . "$(dirname "$0")/_common.sh"
 
+DOGRAH_BASE_URL="${DOGRAH_BASE_URL:-$BASE}"
+export DOGRAH_BASE_URL
+
 : "${TELNYX_API_KEY:?Set TELNYX_API_KEY in .env}"
 : "${TELNYX_NUMBER:?Set TELNYX_NUMBER in .env}"
 : "${TELNYX_CONNECTION_ID:?Set TELNYX_CONNECTION_ID in .env}"

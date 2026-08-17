@@ -33,6 +33,7 @@ test('Telnyx configuration does not invoke the voice pipeline or a PSTN call', (
 
 test('Telnyx activation validates the active mobile caller ID before Dograh changes', () => {
   const script = fs.readFileSync(path.join(__dirname, '..', '..', 'deploy', '08-configure-telnyx.sh'), 'utf8');
+  assert.match(script, /DOGRAH_BASE_URL="\$\{DOGRAH_BASE_URL:-\$BASE\}"/);
   assert.match(script, /\/connections\/\$TELNYX_CONNECTION_ID/);
   assert.match(script, /filter%5Bphone_number%5D=/);
   assert.match(script, /phone_number_type.*mobile/);
