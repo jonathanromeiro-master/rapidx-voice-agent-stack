@@ -130,5 +130,15 @@ Relevantes:
 - Caddy existente continua dono de `80/443`; Dograh usa nginx interno em `127.0.0.1:18443`.
 - STT/TTS locais e a rede privada `rapidx-local-speech` estão em execução. O smoke test WAV para STT foi aprovado.
 - `GET /api/health/dependencies` do Studio retornou banco, STT e TTS como `healthy`; a fila está `disabled` e Dograh, ARI e SIP estão `not_configured` até o preenchimento completo das credenciais.
+
+## Atualização verificada em 2026-08-17
+
+- Dograh responde em `https://dograh.wayno.com.br/api/v1/openapi.json` com HTTP 200.
+- RapidX responde em `https://rapidix.wayno.com.br/app.html`; TLS, HTML e ativos
+  estáticos foram verificados pelo Caddy da VPS.
+- A chave Telnyx passou em consulta somente de leitura e uma conexão ativa foi
+  encontrada. O número móvel brasileiro continua pendente da aprovação da conta.
+- Esta atualização não alterou STT, TTS ou LLM. Não houve chamada PSTN, campanha
+  ou gravação.
 - A imagem ARM64 do Asterisk foi compilada, mas o container Asterisk e o trunk BR DID permanecem desligados até haver credenciais SIP/ARI e o template de destino do carrier.
 - O Studio contém o runtime de cadência por tenant. Ele não agenda nem origina chamadas automaticamente; nenhuma chamada PSTN ou campanha foi executada.

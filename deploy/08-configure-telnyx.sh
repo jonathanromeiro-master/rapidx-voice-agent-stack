@@ -13,6 +13,74 @@ if ! [[ "$TELNYX_NUMBER" =~ ^\+55[1-9][0-9]{9,10}$ ]]; then
   die "TELNYX_NUMBER must be a Brazilian E.164 number, for example +5511999999999"
 fi
 
+telnyx_request() {
+  local method="$1" path="$2" body="${3:-}"
+  local url="https://api.telnyx.com/v2$path"
+  if [ -n "$body" ]; then
+    curl -fsS -X "$method" "$url" \
+      -H "Authorization: Bearer $TELNYX_API_KEY" \
+      -H 'Content-Type: application/json' \
+      -d "$body"
+  else
+    curl -fsS -X "$method" "$url" -H "Authorization: Bearer $TELNYX_API_KEY"
+  fi
+}
+
+telnyx_phone_state() {
+  local encoded_number
+  encoded_number=$(TELNYX_NUMBER="$TELNYX_NUMBER" python3 -c 'from os import environ; from urllib.parse import quote; print(quote(environ["TELNYX_NUMBER"], safe=""))')
+  telnyx_request GET "/phone_numbers?filter%5Bphone_number%5D=$encoded_number" | \
+    TELNYX_NUMBER="$TELNYX_NUMBER" python3 -c '
+import json, os, re, sys
+def canonical(value):
+    digits = re.sub(r"\D", "", str(value or ""))
+    return "+" + digits if digits else ""
+target = canonical(os.environ["TELNYX_NUMBER"])
+rows = [row for row in json.load(sys.stdin).get("data", [])
+        if canonical(row.get("phone_number")) == target]
+if len(rows) != 1:
+    raise SystemExit("Telnyx number was not found exactly once in this account")
+row = rows[0]
+if str(row.get("status", "")).lower() != "active":
+    raise SystemExit("Telnyx number is not active; complete carrier approval first")
+if str(row.get("country_iso_alpha2", "")).upper() != "BR":
+    raise SystemExit("Telnyx number is not a Brazilian number")
+if str(row.get("phone_number_type", "")).lower() != "mobile":
+    raise SystemExit("Telnyx number must be a Brazilian mobile caller ID for this rollout")
+resource_id = str(row.get("id", ""))
+if not resource_id:
+    raise SystemExit("Telnyx number resource ID is missing")
+print(resource_id + "|" + str(row.get("connection_id") or ""))
+'
+}
+
+validate_telnyx_resources() {
+  local phone_state phone_id current_connection payload
+  say "Validating the Telnyx connection and caller ID"
+  telnyx_request GET "/connections/$TELNYX_CONNECTION_ID" | \
+    TELNYX_CONNECTION_ID="$TELNYX_CONNECTION_ID" python3 -c '
+import json, os, sys
+connection = json.load(sys.stdin).get("data") or {}
+if str(connection.get("id", "")) != os.environ["TELNYX_CONNECTION_ID"]:
+    raise SystemExit("Telnyx connection was not found")
+if connection.get("active") is not True:
+    raise SystemExit("Telnyx connection is not active")
+'
+
+  phone_state=$(telnyx_phone_state)
+  IFS='|' read -r phone_id current_connection <<< "$phone_state"
+  if [ "$current_connection" != "$TELNYX_CONNECTION_ID" ]; then
+    payload=$(TELNYX_CONNECTION_ID="$TELNYX_CONNECTION_ID" python3 -c 'import json, os; print(json.dumps({"connection_id": os.environ["TELNYX_CONNECTION_ID"]}))')
+    telnyx_request PATCH "/phone_numbers/$phone_id" "$payload" >/dev/null
+    phone_state=$(telnyx_phone_state)
+    IFS='|' read -r phone_id current_connection <<< "$phone_state"
+  fi
+  [ "$current_connection" = "$TELNYX_CONNECTION_ID" ] || die "Telnyx number is not assigned to the selected connection"
+  ok "Telnyx connection is active with a Brazilian mobile caller ID"
+}
+
+validate_telnyx_resources
+
 TOK=$(dograh_token); export TOK
 ok "Dograh authentication succeeded"
 

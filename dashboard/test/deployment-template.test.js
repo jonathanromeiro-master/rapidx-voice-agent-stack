@@ -12,6 +12,9 @@ test('cloud environment template includes the server-side Dograh WebRTC token', 
 
 test('Telnyx deployment variables are present without changing the speech defaults', () => {
   const template = fs.readFileSync(path.join(__dirname, '..', '..', '.env.example'), 'utf8');
+  assert.match(template, /^DOGRAH_HOST=dograh\.wayno\.com\.br$/m);
+  assert.match(template, /^DOGRAH_BASE_URL=https:\/\/dograh\.wayno\.com\.br$/m);
+  assert.match(template, /^DASHBOARD_HOST=rapidix\.wayno\.com\.br$/m);
   assert.match(template, /^TELEPHONY_PROVIDER=telnyx$/m);
   assert.match(template, /^TELNYX_API_KEY=$/m);
   assert.match(template, /^TELNYX_NUMBER=$/m);
@@ -26,4 +29,12 @@ test('Telnyx configuration does not invoke the voice pipeline or a PSTN call', (
   const script = fs.readFileSync(path.join(__dirname, '..', '..', 'deploy', '08-configure-telnyx.sh'), 'utf8');
   assert.match(script, /docker run -d --name rapidx-voice/);
   assert.doesNotMatch(script, /model-configurations|initiate-call/);
+});
+
+test('Telnyx activation validates the active mobile caller ID before Dograh changes', () => {
+  const script = fs.readFileSync(path.join(__dirname, '..', '..', 'deploy', '08-configure-telnyx.sh'), 'utf8');
+  assert.match(script, /\/connections\/\$TELNYX_CONNECTION_ID/);
+  assert.match(script, /filter%5Bphone_number%5D=/);
+  assert.match(script, /phone_number_type.*mobile/);
+  assert.ok(script.indexOf('validate_telnyx_resources\n\nTOK=') > -1);
 });
